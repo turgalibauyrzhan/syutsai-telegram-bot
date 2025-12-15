@@ -314,6 +314,8 @@ def build_trial_message(birth_str: str, now_dt: datetime) -> str:
         f"{PERSONAL_DAY_INTERPRETATIONS.get(pd, '')}\n\n"
         f"⏳ <b>Trial:</b> доступ ограничен — только личный день."
     )
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("pong ✅")
 
 def build_premium_message(birth_str: str, now_dt: datetime) -> str:
     birth = datetime.strptime(birth_str, "%d.%m.%Y")
@@ -564,12 +566,8 @@ async def daily_broadcast(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err = context.error
     if isinstance(err, Conflict):
-        logger.error("409 Conflict: another getUpdates is running. Stopping this instance.")
-        try:
-            await context.application.stop()
-        except Exception:
-            pass
-        return
+        logger.error("409 Conflict: another instance is running. Exiting to let Render restart.")
+        os._exit(1)
     logger.exception("Unhandled error: %s", err)
 
 # =========================
@@ -599,6 +597,7 @@ def main() -> None:
     )
 
     logger.info("Bot started")
+    app.add_handler(CommandHandler("ping", ping))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
