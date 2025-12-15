@@ -19,7 +19,7 @@ from telegram.ext import (
 # =========================
 # НАСТРОЙКИ
 # =========================
-TOKEN = os.environ.get("8293279514:AAGxWpkxeHQAoCzKM9KPYWefyKR4GlKxl20")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN is not set (Render env var).")
 
