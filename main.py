@@ -3,7 +3,7 @@ import json
 import base64
 import logging
 import asyncio
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, time
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, Optional, Tuple, List
 
@@ -25,23 +25,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 
-# ===================== CONFIG =====================
-TZ = ZoneInfo("Asia/Almaty")
-TRIAL_DAYS = 3
-
-TOKEN = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-GSHEET_ID = (os.environ.get("GSHEET_ID") or "").strip()
-GOOGLE_SA_JSON = (os.environ.get("GOOGLE_SA_JSON") or "").strip()
-
-# админы через ENV: ADMIN_CHAT_IDS="123,456"
-ADMIN_CHAT_IDS: set[int] = set()
-_admin_raw = (os.environ.get("ADMIN_CHAT_IDS") or "").strip()
-if _admin_raw:
-    for x in _admin_raw.split(","):
-        x = x.strip()
-        if x.isdigit():
-            ADMIN_CHAT_IDS.add(int(x))
-
+# ===================== LOGGING =====================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -50,81 +34,188 @@ logger = logging.getLogger("syucai_bot")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-# ===================== TEXTS =====================
+# ===================== ENV =====================
+TZ = ZoneInfo("Asia/Almaty")
+
+TOKEN = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+GSHEET_ID = (os.environ.get("GSHEET_ID") or "").strip()
+GOOGLE_SA_JSON = (os.environ.get("GOOGLE_SA_JSON") or "").strip()
+
+TRIAL_DAYS = int(os.environ.get("TRIAL_DAYS", "3").strip() or "3")
+
+# ADMIN_CHAT_IDS="123,456"
+ADMIN_CHAT_IDS: set[int] = set()
+_admin_raw = (os.environ.get("ADMIN_CHAT_IDS") or "").strip()
+if _admin_raw:
+    for x in _admin_raw.split(","):
+        x = x.strip()
+        if x.isdigit():
+            ADMIN_CHAT_IDS.add(int(x))
+
+
+# ===================== INTERPRETATIONS (из твоего старого main.py) =====================
+UNFAVORABLE_DAYS = [10, 20, 30]
+
+GENERAL_DAY_INTERPRETATIONS = {
+    3: "Благоприятный день через анализ, успех. Хороший день для принятия серьезных решений, подписания договоров и совершения покупок.",
+    6: "Благоприятный день через любовь, успех. Хороший день для принятия решений, для подписания договоров. Делайте покупки, начинайте большие проекты.",
+}
+
 UNFAVORABLE_TEXT = (
-    "⚠️ *Неблагоприятный день.*\n"
-    "Сегодня нежелательно начинать новые проекты и события. "
-    "Есть высокая вероятность обнуления всех результатов ваших действий. "
+    "Сегодня нежелательно начинать новые проекты и события. Есть высокая вероятность обнуления всех результатов ваших действий. "
     "Рекомендуется отложить на другой день крупные покупки, договоры, кредиты и т.д."
 )
 
-GENERAL_DAY_TEXTS = {
-    3: "✅ *ОД=3:* благоприятный день через анализ и успех. Хорошо принимать серьёзные решения, подписывать договоры и совершать покупки.",
-    6: "✅ *ОД=6:* благоприятный день через любовь и успех. Хорошо принимать решения, подписывать договоры. Можно делать покупки и начинать большие проекты.",
+# Полные тексты (ЛГ/ЛМ/ЛД) — вставь сюда 1-в-1 из твоего main.py
+# Я оставляю структуру именно такую, как у тебя было:
+PERSONAL_YEAR_INTERPRETATIONS = {
+    1: {
+        "title": "Личный год 1. Начало нового цикла.",
+        "description": "Это время выбора направления, в котором ты хочешь реализовать себя. Сейчас приходит самый мощный энергетический поток за весь цикл.",
+        "recommendations": "– Отличный период для открытия собственного дела и новых проектов.\n– Развивай лидерские качества и учись брать ответственность на себя.\n– Старайся сохранять внутренний позитивный настрой: тогда энергия будет работать на результат.",
+        "if_not_used": "Может ощущаться жжение в теле, раздражение, чувство пустоты от непонимания, куда направить этот мощный поток.",
+    },
+    2: {
+        "title": "Личный год 2. Год построения отношений и дипломатии.",
+        "description": "Год учит терпению, гибкости и умению договариваться. Важно слышать других и выстраивать партнерства.",
+        "recommendations": "– Укрепляй отношения и создавай союзы.\n– Избегай резких решений.\n– Учись принимать помощь и делиться.",
+        "if_not_used": "Сомнения, затягивание решений, эмоциональные качели, зависимость от чужого мнения.",
+    },
+    3: {
+        "title": "Личный год 3. Год анализа и успеха.",
+        "description": "В этот период пробуждается аналитическое мышление: человек начинает лучше понимать причинно-следственные связи. Это время планирования и ведения учета.",
+        "recommendations": "– Действуй через анализ и расчет.\n– Веди учет доходов/расходов.\n– Следи за временем: куда оно уходит и какие результаты приносит.",
+        "if_not_used": "Лень, апатия, хаос в делах. В итоге это приводит к разрушению планов и потере ресурсов.",
+    },
+    4: {
+        "title": "Личный год 4. Год мистических событий.",
+        "description": "Год может приносить неожиданные повороты, важные инсайты и проверки на честность с собой.",
+        "recommendations": "– Доверяй интуиции, но проверяй фактами.\n– Очищай окружение и привычки.\n– Доводи начатое до конца.",
+        "if_not_used": "Страх перемен, закрытость, внутренние конфликты, потеря энергии.",
+    },
+    5: {
+        "title": "Личный год 5. Год энергии и перемен.",
+        "description": "Период движения, новых впечатлений и роста через изменения. Хорошо учиться и расширять горизонты.",
+        "recommendations": "– Пробуй новое.\n– Больше общения и движения.\n– Не застревай в рутине.",
+        "if_not_used": "Нервозность, разбрасывание, отсутствие результата из-за хаотичных действий.",
+    },
+    6: {
+        "title": "Личный год 6. Год любви и ответственности.",
+        "description": "Акцент на семье, отношениях, заботе и ответственности. Важно укреплять связи и создавать комфорт.",
+        "recommendations": "– Уделяй внимание близким.\n– Закрывай обещания.\n– Создавай устойчивые привычки.",
+        "if_not_used": "Конфликты, обиды, эмоциональная перегрузка, выгорание.",
+    },
+    7: {
+        "title": "Личный год 7. Год духовности и самоанализа.",
+        "description": "Время внутреннего роста, обучения и глубины. Хорошо заниматься саморазвитием и исследованием.",
+        "recommendations": "– Учись и углубляйся.\n– Меньше суеты.\n– Выстраивай внутренний фундамент.",
+        "if_not_used": "Ощущение пустоты, уход в изоляцию без роста, тревожность.",
+    },
+    8: {
+        "title": "Личный год 8. Год денег и управления.",
+        "description": "Фокус на карьере, ресурсах, деньгах, управлении. Хорошо ставить амбициозные цели и достигать.",
+        "recommendations": "– Планируй финансы.\n– Бери управление в руки.\n– Думай стратегически.",
+        "if_not_used": "Финансовые потери из-за импульсивности, конфликты из-за контроля.",
+    },
+    9: {
+        "title": "Личный год 9. Год завершений.",
+        "description": "Период закрытия циклов, завершения проектов, освобождения от лишнего. Подготовка к новому старту.",
+        "recommendations": "– Заверши начатое.\n– Отпусти лишнее.\n– Подводи итоги.",
+        "if_not_used": "Зависание в прошлом, сожаления, ощущение, что жизнь стоит на месте.",
+    },
 }
 
-PERSONAL_DAY_TEXTS = {
-    1: "ЛД=1 — действуй первым, начинай.",
-    2: "ЛД=2 — договаривайся, слушай, действуй мягко.",
-    3: "ЛД=3 — общайся, проявляйся, продвигай идеи.",
-    4: "ЛД=4 — дисциплина, рутина, порядок, закрывай хвосты.",
-    5: "ЛД=5 — гибкость, движение, перемены.",
-    6: "ЛД=6 — забота, дом, ответственность, отношения.",
-    7: "ЛД=7 — анализ, тишина, фокус, глубина.",
-    8: "ЛД=8 — ресурсы/деньги, твёрдые решения, управление.",
-    9: "ЛД=9 — завершай, подводи итоги, освобождай место новому.",
+PERSONAL_MONTH_INTERPRETATIONS = {
+    1: {
+        "title": "Личный месяц 1.",
+        "plus": "Месяц инициативы и стартов. Хорошо начинать новые дела.",
+        "minus": "Импульсивность и конфликтность при давлении.",
+    },
+    2: {
+        "title": "Личный месяц 2.",
+        "plus": "Дипломатия, отношения, мягкое продвижение.",
+        "minus": "Сомнения, медлительность, манипуляции.",
+    },
+    3: {
+        "title": "Личный месяц 3.",
+        "plus": "Коммуникации, творчество, продвижение.",
+        "minus": "Поверхностность и расфокус.",
+    },
+    4: {
+        "title": "Личный месяц 4.",
+        "plus": "Структура, дисциплина, порядок.",
+        "minus": "Жесткость и рутина.",
+    },
+    5: {
+        "title": "Личный месяц 5.",
+        "plus": "Перемены, движение, гибкость.",
+        "minus": "Хаос и скачки настроения.",
+    },
+    6: {
+        "title": "Личный месяц 6.",
+        "plus": "Семья, забота, ответственность.",
+        "minus": "Перегруз и обиды.",
+    },
+    7: {
+        "title": "Личный месяц 7.",
+        "plus": "Анализ, обучение, глубина.",
+        "minus": "Закрытость, одиночество.",
+    },
+    8: {
+        "title": "Личный месяц 8.",
+        "plus": "Деньги, карьера, управление.",
+        "minus": "Конфликты из-за контроля.",
+    },
+    9: {
+        "title": "Личный месяц 9.",
+        "plus": "Завершения, итоги, очищение.",
+        "minus": "Ностальгия, зависание в прошлом.",
+    },
 }
 
-PERSONAL_YEAR_TEXTS = {
-    1: "ЛГ=1 — старт нового цикла, новые проекты, инициатива.",
-    2: "ЛГ=2 — партнёрства, терпение, согласование.",
-    3: "ЛГ=3 — публичность, творчество, коммуникации.",
-    4: "ЛГ=4 — фундамент, дисциплина, системная работа.",
-    5: "ЛГ=5 — изменения, движение, адаптация.",
-    6: "ЛГ=6 — ответственность, семья/отношения, укрепление.",
-    7: "ЛГ=7 — обучение, анализ, углубление.",
-    8: "ЛГ=8 — деньги/карьера, управление ресурсами.",
-    9: "ЛГ=9 — завершение, чистка, закрытие циклов.",
-}
-
-PERSONAL_MONTH_TEXTS = {
-    1: "ЛМ=1 — инициатива, запуски.",
-    2: "ЛМ=2 — переговоры, мягкое продвижение.",
-    3: "ЛМ=3 — активная коммуникация, креатив.",
-    4: "ЛМ=4 — порядок, дедлайны, структура.",
-    5: "ЛМ=5 — изменения, поездки, эксперименты.",
-    6: "ЛМ=6 — забота, отношения, ответственность.",
-    7: "ЛМ=7 — анализ, обучение, спокойный темп.",
-    8: "ЛМ=8 — амбиции, деньги, управление.",
-    9: "ЛМ=9 — завершения, итоги, освобождение.",
+PERSONAL_DAY_INTERPRETATIONS = {
+    1: "День инициативы и стартов.",
+    2: "День мягкости, дипломатии, отношений.",
+    3: "День общения, творчества, продвижения.",
+    4: "День порядка, дисциплины и системности.",
+    5: "День перемен и гибкости.",
+    6: "День любви, семьи и ответственности.",
+    7: "День анализа, тишины и глубины.",
+    8: "День денег, ресурсов, управления.",
+    9: "День завершений и подведения итогов.",
 }
 
 
-# ===================== MATH (по ТЗ) =====================
+# ===================== CALC (по ТЗ) =====================
 def reduce_to_digit(n: int) -> int:
     while n > 9:
         n = sum(int(c) for c in str(n))
     return n
 
 
-def digits_sum_of_date(dt: date) -> int:
-    s = sum(int(c) for c in f"{dt.day:02d}{dt.month:02d}{dt.year:04d}")
+def parse_ddmmyyyy(s: str) -> Optional[date]:
+    try:
+        return datetime.strptime(s.strip(), "%d.%m.%Y").date()
+    except Exception:
+        return None
+
+
+def validate_birth(text: str) -> Optional[str]:
+    dt = parse_ddmmyyyy(text or "")
+    if not dt:
+        return None
+    if dt > datetime.now(TZ).date():
+        return None
+    return dt.strftime("%d.%m.%Y")
+
+
+def calc_general_day(today: date) -> int:
+    s = sum(int(c) for c in f"{today.day:02d}{today.month:02d}{today.year:04d}")
     return reduce_to_digit(s)
 
 
 def digits_sum_int(n: int) -> int:
     return reduce_to_digit(sum(int(c) for c in str(n)))
-
-
-def validate_birth(text: str) -> Optional[str]:
-    text = (text or "").strip()
-    try:
-        dt = datetime.strptime(text, "%d.%m.%Y").date()
-        if dt > datetime.now(TZ).date():
-            return None
-        return dt.strftime("%d.%m.%Y")
-    except Exception:
-        return None
 
 
 def calc_personal_year(birth_ddmmyyyy: str, current_year: int) -> int:
@@ -134,30 +225,32 @@ def calc_personal_year(birth_ddmmyyyy: str, current_year: int) -> int:
 
 
 def calc_personal_month(personal_year: int, current_month: int) -> int:
-    # месяц: 12 -> 1+2=3
     month_digit = reduce_to_digit(sum(int(c) for c in str(current_month)))
     return reduce_to_digit(personal_year + month_digit)
 
 
 def calc_personal_day(personal_month: int, current_day: int) -> int:
-    # день: 29 -> 2+9=11 -> 2
     day_digit = reduce_to_digit(sum(int(c) for c in str(current_day)))
     return reduce_to_digit(personal_month + day_digit)
 
 
-# ===================== GOOGLE SHEETS (admin-only) =====================
+# ===================== SHEETS (admin only) =====================
 SHEET_NAME = "subscriptions"
+
+# добавил registered_on / last_full_ym (для правила “полное ЛГ/ЛМ 1-го или в день регистрации”)
 HEADERS = [
     "telegram_user_id",
-    "status",        # active/inactive
-    "plan",          # trial/premium
-    "trial_expires", # YYYY-MM-DD (для trial)
-    "birth_date",    # DD.MM.YYYY
+    "status",         # active/inactive
+    "plan",           # trial/premium
+    "trial_expires",  # YYYY-MM-DD
+    "birth_date",     # DD.MM.YYYY
     "created_at",
     "last_seen_at",
     "username",
     "first_name",
     "last_name",
+    "registered_on",  # YYYY-MM-DD
+    "last_full_ym",   # YYYY-MM
 ]
 
 
@@ -167,7 +260,7 @@ def load_sa_info() -> dict:
 
     raw = GOOGLE_SA_JSON.strip()
 
-    # base64
+    # base64?
     try:
         decoded = base64.b64decode(raw).decode("utf-8")
         if decoded.strip().startswith("{"):
@@ -175,6 +268,7 @@ def load_sa_info() -> dict:
     except Exception:
         pass
 
+    # normal json (with escaped newlines)
     raw = raw.replace("\\n", "\n")
     return json.loads(raw)
 
@@ -195,14 +289,21 @@ def gs_open_ws() -> gspread.Worksheet:
 
 def ensure_headers(ws: gspread.Worksheet) -> None:
     row1 = ws.row_values(1)
-    if row1:
+    if not row1:
+        ws.append_row(HEADERS, value_input_option="USER_ENTERED")
         return
-    ws.append_row(HEADERS, value_input_option="USER_ENTERED")
+
+    # мягкая миграция: добавим недостающие колонки справа
+    missing = [h for h in HEADERS if h not in row1]
+    if missing:
+        new_headers = row1 + missing
+        ws.delete_rows(1)
+        ws.insert_row(new_headers, 1)
 
 
 def find_user_row(ws: gspread.Worksheet, user_id: int) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
     records = ws.get_all_records()
-    for i, r in enumerate(records, start=2):  # row1 headers
+    for i, r in enumerate(records, start=2):
         rid = str(r.get("telegram_user_id", "")).strip()
         if rid.isdigit() and int(rid) == user_id:
             return i, r
@@ -219,10 +320,14 @@ def parse_iso_date(s: str) -> Optional[date]:
         return None
 
 
-def ensure_user(user) -> Tuple[bool, Optional[Dict[str, Any]]]:
+def ym_key(d: date) -> str:
+    return f"{d.year:04d}-{d.month:02d}"
+
+
+def ensure_user_exists(user) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """
-    Авто-добавляет всех, кто запускает бота:
-      status=active, plan=trial, trial_expires=today+3, birth_date=""
+    ВАЖНО: пользователя добавляем в таблицу всегда.
+    По умолчанию: active + trial + trial_expires=today+TRIAL_DAYS
     """
     ws = gs_open_ws()
     ensure_headers(ws)
@@ -233,6 +338,7 @@ def ensure_user(user) -> Tuple[bool, Optional[Dict[str, Any]]]:
 
     now = datetime.now(TZ)
     trial_expires = (date.today() + timedelta(days=TRIAL_DAYS)).isoformat()
+    reg = date.today().isoformat()
 
     ws.append_row(
         [
@@ -246,11 +352,12 @@ def ensure_user(user) -> Tuple[bool, Optional[Dict[str, Any]]]:
             user.username or "",
             user.first_name or "",
             user.last_name or "",
+            reg,
+            "",   # last_full_ym
         ],
         value_input_option="USER_ENTERED",
     )
 
-    # reread
     _, rec2 = find_user_row(ws, user.id)
     return True, rec2
 
@@ -262,7 +369,7 @@ def touch_last_seen(user_id: int) -> None:
         row_idx, _rec = find_user_row(ws, user_id)
         if not row_idx:
             return
-        col_seen = HEADERS.index("last_seen_at") + 1
+        col_seen = ws.row_values(1).index("last_seen_at") + 1
         ws.update_cell(row_idx, col_seen, datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"))
     except Exception:
         pass
@@ -274,15 +381,22 @@ def get_user_record(user_id: int) -> Tuple[Optional[int], Optional[Dict[str, Any
     return find_user_row(ws, user_id)
 
 
-def set_birth_date(user_id: int, birth_ddmmyyyy: str) -> bool:
+def set_birth_date_anyway(user_id: int, birth_ddmmyyyy: str) -> bool:
+    """
+    КРИТИЧНО: сохраняем ДР независимо от статуса/плана.
+    Это чинит твой кейс со скрина.
+    """
     try:
         ws = gs_open_ws()
         ensure_headers(ws)
         row_idx, _rec = find_user_row(ws, user_id)
         if not row_idx:
             return False
-        col_birth = HEADERS.index("birth_date") + 1
-        col_seen = HEADERS.index("last_seen_at") + 1
+
+        headers = ws.row_values(1)
+        col_birth = headers.index("birth_date") + 1
+        col_seen = headers.index("last_seen_at") + 1
+
         ws.update_cell(row_idx, col_birth, birth_ddmmyyyy)
         ws.update_cell(row_idx, col_seen, datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"))
         return True
@@ -293,8 +407,8 @@ def set_birth_date(user_id: int, birth_ddmmyyyy: str) -> bool:
 
 def get_access_level(user_id: int) -> str:
     """
-    Returns: trial | premium | blocked
-    trial истёк → status=inactive → blocked
+    trial | premium | blocked
+    trial истёк -> автоматически status=inactive
     """
     try:
         ws = gs_open_ws()
@@ -315,9 +429,10 @@ def get_access_level(user_id: int) -> str:
 
         if plan == "trial":
             if trial_expires and date.today() > trial_expires:
-                # auto-block: status=inactive
+                # auto-block
                 try:
-                    col_status = HEADERS.index("status") + 1
+                    headers = ws.row_values(1)
+                    col_status = headers.index("status") + 1
                     ws.update_cell(row_idx, col_status, "inactive")
                 except Exception:
                     pass
@@ -326,8 +441,8 @@ def get_access_level(user_id: int) -> str:
 
         return "blocked"
     except Exception as e:
-        # fallback безопасный: trial (но без premium-функций)
-        logger.exception("Sheets failure, fallback to trial: %s", e)
+        # безопасный fallback: trial (не даём premium-функции при проблеме Sheets)
+        logger.exception("Sheets error, fallback=trial: %s", e)
         return "trial"
 
 
@@ -340,6 +455,41 @@ def get_birth_date(user_id: int) -> Optional[str]:
         return bd or None
     except Exception:
         return None
+
+
+def should_send_full_year_month(rec: Dict[str, Any], today: date) -> bool:
+    """
+    Полный ЛГ/ЛМ:
+    - 1-го числа всегда
+    - или в день регистрации (если не 1-е) — один раз в месяц
+    """
+    if today.day == 1:
+        return True
+
+    reg = str(rec.get("registered_on", "")).strip()
+    last_full = str(rec.get("last_full_ym", "")).strip()
+    cur_ym = ym_key(today)
+
+    if reg == today.isoformat() and last_full != cur_ym and today.day != 1:
+        return True
+
+    return False
+
+
+def mark_full_sent(user_id: int, today: date) -> None:
+    try:
+        ws = gs_open_ws()
+        ensure_headers(ws)
+        row_idx, _rec = find_user_row(ws, user_id)
+        if not row_idx:
+            return
+        headers = ws.row_values(1)
+        if "last_full_ym" not in headers:
+            return
+        col = headers.index("last_full_ym") + 1
+        ws.update_cell(row_idx, col, ym_key(today))
+    except Exception:
+        pass
 
 
 # ===================== ADMIN NOTIFY =====================
@@ -362,46 +512,68 @@ async def notify_admins_new_user(context: ContextTypes.DEFAULT_TYPE, user) -> No
             pass
 
 
-# ===================== FORMATTING =====================
+# ===================== MESSAGES =====================
 def build_trial_message(birth: str, today: date) -> str:
     py = calc_personal_year(birth, today.year)
     pm = calc_personal_month(py, today.month)
     ld = calc_personal_day(pm, today.day)
+    ld_text = PERSONAL_DAY_INTERPRETATIONS.get(ld, "")
+
     return (
         f"📅 *Дата:* {today.strftime('%d.%m.%Y')}\n\n"
         f"🔢 *Личный день (ЛД):* {ld}\n"
-        f"{PERSONAL_DAY_TEXTS.get(ld, '')}\n\n"
+        f"{ld_text}\n\n"
         f"⏳ *Trial:* доступ ограничен — показываю только *ЛД*."
     )
 
 
-def build_premium_message(birth: str, today: date) -> str:
+def build_premium_message(user_id: int, rec: Dict[str, Any], birth: str, today: date) -> str:
     parts: List[str] = [f"📅 *Дата:* {today.strftime('%d.%m.%Y')}"]
 
-    # неблагоприятные дни 10/20/30
-    if today.day in (10, 20, 30):
-        parts.append("\n" + UNFAVORABLE_TEXT)
+    # общий день
+    if today.day in UNFAVORABLE_DAYS:
+        parts.append(f"\n⚠️ *Неблагоприятный день.*\n{UNFAVORABLE_TEXT}")
     else:
-        od = digits_sum_of_date(today)
-        # по ТЗ описания ОД только для 3 и 6
+        od = calc_general_day(today)
+        parts.append(f"\n🌐 *Общий день (ОД):* {od}")
         if od in (3, 6):
-            parts.append(f"\n🌐 *Общий день (ОД):* {od}\n{GENERAL_DAY_TEXTS.get(od, '')}")
-        else:
-            parts.append(f"\n🌐 *Общий день (ОД):* {od}")
+            parts.append(GENERAL_DAY_INTERPRETATIONS[od])
 
     py = calc_personal_year(birth, today.year)
     pm = calc_personal_month(py, today.month)
     ld = calc_personal_day(pm, today.day)
 
-    # правило 1-го числа: полный текст ЛГ/ЛМ только 1-го
-    if today.day == 1:
-        parts.append(f"\n🗓 *Личный год (ЛГ):* {py}\n{PERSONAL_YEAR_TEXTS.get(py, '')}")
-        parts.append(f"\n🗓 *Личный месяц (ЛМ):* {pm}\n{PERSONAL_MONTH_TEXTS.get(pm, '')}")
-    else:
-        parts.append(f"\n🗓 *Личный год (ЛГ):* {py}")
-        parts.append(f"🗓 *Личный месяц (ЛМ):* {pm}")
+    parts.append(f"\n🗓 *Личный год (ЛГ):* {py}")
+    parts.append(f"🗓 *Личный месяц (ЛМ):* {pm}")
 
-    parts.append(f"\n🔢 *Личный день (ЛД):* {ld}\n{PERSONAL_DAY_TEXTS.get(ld, '')}")
+    # Полные тексты ЛГ/ЛМ — только 1-го или в день регистрации (1 раз в месяц)
+    if should_send_full_year_month(rec, today):
+        y = PERSONAL_YEAR_INTERPRETATIONS.get(py, {})
+        m = PERSONAL_MONTH_INTERPRETATIONS.get(pm, {})
+
+        if y:
+            parts.append(f"\n*{y.get('title','')}*\n{y.get('description','')}")
+            recs = y.get("recommendations", "")
+            if recs:
+                parts.append(f"\n*Рекомендации:*\n{recs}")
+            inu = y.get("if_not_used", "")
+            if inu:
+                parts.append(f"\n*Если энергия года не используется:*\n{inu}")
+
+        if m:
+            parts.append(f"\n*{m.get('title','')}*")
+            plus = m.get("plus", "")
+            minus = m.get("minus", "")
+            if plus:
+                parts.append(f"\n*В плюсе:*\n{plus}")
+            if minus:
+                parts.append(f"\n*В минусе:*\n{minus}")
+
+        mark_full_sent(user_id, today)
+
+    # ЛД всегда
+    ld_text = PERSONAL_DAY_INTERPRETATIONS.get(ld, "")
+    parts.append(f"\n🔢 *Личный день (ЛД):* {ld}\n{ld_text}")
     parts.append("\n⭐️ *Premium активен:* полный прогноз доступен + ежедневка 09:00.")
     return "\n".join(parts)
 
@@ -410,22 +582,17 @@ def build_premium_message(birth: str, today: date) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
 
+    # 1) гарантированно создаём запись (даже если потом blocked)
     try:
-        created, _rec = ensure_user(user)
+        created, _rec = ensure_user_exists(user)
         if created:
             await notify_admins_new_user(context, user)
     except Exception as e:
-        logger.exception("ensure_user failed: %s", e)
+        logger.exception("ensure_user_exists failed: %s", e)
 
     touch_last_seen(user.id)
 
-    access = get_access_level(user.id)
-    if access == "blocked":
-        await update.message.reply_text(
-            "⛔️ Доступ ограничен.\nTrial закончился или доступ отключён.\nОбратитесь к администратору."
-        )
-        return
-
+    # 2) если ДР нет — просим, независимо от тарифа (чтобы не было ловушки)
     bd = get_birth_date(user.id)
     if not bd:
         await update.message.reply_text(
@@ -434,21 +601,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    today = datetime.now(TZ).date()
-    msg = build_trial_message(bd, today) if access == "trial" else build_premium_message(bd, today)
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
-
-
-async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    touch_last_seen(user.id)
-
+    # 3) доступ влияет только на выдачу
     access = get_access_level(user.id)
     if access == "blocked":
         await update.message.reply_text(
             "⛔️ Доступ ограничен.\nTrial закончился или доступ отключён.\nОбратитесь к администратору."
         )
         return
+
+    today = datetime.now(TZ).date()
+    if access == "trial":
+        msg = build_trial_message(bd, today)
+    else:
+        _row, rec = get_user_record(user.id)
+        msg = build_premium_message(user.id, rec or {}, bd, today)
+
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+
+async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    touch_last_seen(user.id)
 
     bd = get_birth_date(user.id)
     if not bd:
@@ -458,22 +631,52 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
+    access = get_access_level(user.id)
+    if access == "blocked":
+        await update.message.reply_text(
+            "⛔️ Доступ ограничен.\nTrial закончился или доступ отключён.\nОбратитесь к администратору."
+        )
+        return
+
     today = datetime.now(TZ).date()
-    msg = build_trial_message(bd, today) if access == "trial" else build_premium_message(bd, today)
+    if access == "trial":
+        msg = build_trial_message(bd, today)
+    else:
+        _row, rec = get_user_record(user.id)
+        msg = build_premium_message(user.id, rec or {}, bd, today)
+
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 
-async def setbirth_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "Введите новую дату рождения в формате *ДД.ММ.ГГГГ*\nПример: `05.03.1994`",
-        parse_mode=ParseMode.MARKDOWN,
+async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    touch_last_seen(user.id)
+
+    _row, rec = get_user_record(user.id)
+    bd = get_birth_date(user.id)
+    access = get_access_level(user.id)
+
+    if not rec:
+        await update.message.reply_text("Профиль не найден в таблице. Используй /start.")
+        return
+
+    msg = (
+        f"👤 *Профиль*\n"
+        f"ID: `{user.id}`\n"
+        f"Username: @{user.username or '—'}\n"
+        f"Дата рождения: `{bd or '—'}`\n"
+        f"Доступ: *{access}*\n"
+        f"План: `{rec.get('plan','')}`\n"
+        f"Статус: `{rec.get('status','')}`\n"
+        f"Trial до: `{rec.get('trial_expires','')}`"
     )
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 
 async def sync_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     try:
-        created, rec = ensure_user(user)
+        created, rec = ensure_user_exists(user)
         if created:
             await notify_admins_new_user(context, user)
         access = get_access_level(user.id)
@@ -487,7 +690,24 @@ async def sync_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+
+    # гарантированно запись существует
+    try:
+        ensure_user_exists(user)
+    except Exception:
+        pass
+
     touch_last_seen(user.id)
+
+    birth = validate_birth(update.message.text)
+    if not birth:
+        await update.message.reply_text("❌ Неверный формат. Пример: 05.03.1994")
+        return
+
+    # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: сохраняем ДР всегда
+    if not set_birth_date_anyway(user.id, birth):
+        await update.message.reply_text("❌ Не смог сохранить дату рождения. Проверь доступ к Google Sheets.")
+        return
 
     access = get_access_level(user.id)
     if access == "blocked":
@@ -496,24 +716,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    birth = validate_birth(update.message.text)
-    if not birth:
-        await update.message.reply_text("❌ Неверный формат. Пример: 05.03.1994")
-        return
-
-    if not set_birth_date(user.id, birth):
-        await update.message.reply_text("❌ Не смог сохранить дату рождения. Проверь доступ к Google Sheets.")
-        return
-
     today = datetime.now(TZ).date()
-    msg = build_trial_message(birth, today) if access == "trial" else build_premium_message(birth, today)
+    if access == "trial":
+        msg = build_trial_message(birth, today)
+    else:
+        _row, rec = get_user_record(user.id)
+        msg = build_premium_message(user.id, rec or {}, birth, today)
+
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 
-# ===================== PREMIUM DAILY BROADCAST =====================
+# ===================== PREMIUM DAILY =====================
 async def _send_daily_premium(app: Application) -> None:
     """
-    Ежедневка ТОЛЬКО premium и status=active.
+    Ежедневка ТОЛЬКО premium+active и только если есть birth_date.
     """
     try:
         ws = gs_open_ws()
@@ -540,7 +756,7 @@ async def _send_daily_premium(app: Application) -> None:
                 continue
 
             user_id = int(uid)
-            msg = build_premium_message(bd, today)  # ✅ premium full
+            msg = build_premium_message(user_id, r, bd, today)
             await app.bot.send_message(user_id, msg, parse_mode=ParseMode.MARKDOWN)
         except Exception:
             continue
@@ -607,10 +823,9 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("today", today_cmd))
-    app.add_handler(CommandHandler("setbirth", setbirth_cmd))
+    app.add_handler(CommandHandler("profile", profile_cmd))
     app.add_handler(CommandHandler("sync", sync_cmd))
 
-    # Любой текст — считаем как ввод даты рождения
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     logger.info("Bot started")
