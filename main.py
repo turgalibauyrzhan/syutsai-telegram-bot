@@ -8,6 +8,8 @@ from typing import Optional, Tuple, Dict, Any
 
 import gspread
 from google.oauth2.service_account import Credentials
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.INFO)
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -51,6 +53,17 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+async def sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    try:
+        created = ensure_user_in_sheet(user)
+        if created:
+            await update.message.reply_text("✅ Добавил тебя в Google Sheets (subscriptions).")
+        else:
+            await update.message.reply_text("ℹ️ Ты уже есть в Google Sheets (или запись не нужна).")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Не смог записать в Google Sheets: {type(e).__name__}: {e}")
+app.add_handler(CommandHandler("sync", sync))
 
 # =========================
 # FALLBACK TEXTS (if Sheets/text store fails)
