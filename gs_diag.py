@@ -7,7 +7,6 @@ from zoneinfo import ZoneInfo
 import gspread
 from google.oauth2.service_account import Credentials
 
-
 TZ = ZoneInfo("Asia/Almaty")
 
 
