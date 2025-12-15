@@ -1,8 +1,14 @@
 import os
+import json
+import time as pytime
 import logging
 import sqlite3
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
+from typing import Dict, Any, Optional, Tuple
+
+import gspread
+from google.oauth2.service_account import Credentials
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -26,6 +32,18 @@ if not TOKEN:
 TZ = ZoneInfo("Asia/Almaty")
 DB_PATH = os.environ.get("BOT_DB_PATH", "bot.db")
 
+GSHEET_ID = os.environ.get("GSHEET_ID")
+GOOGLE_SA_JSON = os.environ.get("GOOGLE_SA_JSON")
+TEXT_CACHE_TTL_SECONDS = int(os.environ.get("TEXT_CACHE_TTL_SECONDS", "300"))
+
+ADMIN_USER_IDS = set()
+_admin_raw = os.environ.get("ADMIN_USER_IDS", "").strip()
+if _admin_raw:
+    for x in _admin_raw.split(","):
+        x = x.strip()
+        if x.isdigit():
+            ADMIN_USER_IDS.add(int(x))
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -33,54 +51,160 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =========================
-# ТЕКСТЫ ТРАКТОВОК
-# (оставил твою структуру 1:1)
+# FALLBACK ТЕКСТЫ (если Sheets недоступен)
 # =========================
 UNFAVORABLE_DAYS = {10, 20, 30}
 
-GENERAL_DAY_INTERPRETATIONS = {
-    3: "Благоприятный день через анализ, успех. Хороший день для принятия серьёзных решений, подписания договоров и совершения покупок.",
-    6: "Благоприятный день через любовь, успех. Хороший день для принятия решений, для подписания договоров. Делайте покупки, начинайте большие проекты.",
+DEFAULT_GENERAL_DAY_INTERPRETATIONS = {
+    1: "День новых начинаний и инициатив. Благоприятно начинать проекты, принимать самостоятельные решения, брать ответственность.",
+    2: "День взаимодействия и партнёрства. Хорошо для переговоров, совместной работы, примирения и дипломатии.",
+    3: "Благоприятный день через анализ и успех. Подходит для принятия серьёзных решений, подписания договоров и совершения покупок.",
+    4: "День структуры и порядка. Благоприятно заниматься планированием, документами, финансами и рутинными задачами.",
+    5: "День перемен и активности. Хорошо для поездок, общения, новых знакомств, гибких решений.",
+    6: "Благоприятный день через любовь и гармонию. Подходит для важных решений, подписания договоров, покупок и начала больших проектов.",
+    7: "День анализа и уединения. Лучше посвятить время размышлениям, обучению, внутренней работе.",
+    8: "День материальных вопросов и власти. Хорош для бизнеса, финансовых операций, управления и карьерных решений.",
+    9: "День завершения и подведения итогов. Благоприятно закрывать дела, отпускать старое, заниматься благотворительностью.",
     "unfavorable": (
         "Сегодня нежелательно начинать новые проекты и события. Есть высокая вероятность обнуления всех результатов ваших действий. "
-        "Рекомендуется отложить на другой день крупные покупки, договоры, кредиты и т.д."
+        "Рекомендуется отложить на другой день крупные покупки, договоры, кредиты и важные решения."
     ),
 }
 
-# ВАЖНО: Ниже словари можно оставить твоими большими текстами.
-# Я оставляю минимальные заглушки-структуры, чтобы код был цельный.
-# Просто вставь сюда свои полные тексты из текущего main.py (они у тебя уже есть).
-PERSONAL_YEAR_INTERPRETATIONS = {
-    # пример структуры:
-    1: {"title": "Личный год 1. Начало нового цикла.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    2: {"title": "Личный год 2.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    3: {"title": "Личный год 3.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    4: {"title": "Личный год 4.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    5: {"title": "Личный год 5.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    6: {"title": "Личный год 6.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    7: {"title": "Личный год 7.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    8: {"title": "Личный год 8.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    9: {"title": "Личный год 9.", "description": "…", "recommendations": "…", "if_not_used": "…"},
+DEFAULT_PERSONAL_DAY_INTERPRETATIONS = {
+    1: "День личной инициативы. Проявляйте самостоятельность, принимайте решения, действуйте смело.",
+    2: "День чувствительности и взаимодействия. Будьте внимательны к эмоциям — своим и чужим.",
+    3: "День общения и творчества. Благоприятен для самовыражения, встреч и лёгких решений.",
+    4: "День дисциплины и порядка. Лучше сосредоточиться на делах, обязанностях и завершении задач.",
+    5: "День свободы и движения. Возможны неожиданные события, гибкость даст лучший результат.",
+    6: "День семьи и ответственности. Подходит для заботы о близких, домашних и личных дел.",
+    7: "День внутренней работы. Хорошо замедлиться, подумать, понаблюдать.",
+    8: "День силы и контроля. Благоприятен для финансовых и рабочих решений.",
+    9: "День отпускания и завершения. Не держитесь за старое — освобождение даст облегчение.",
 }
 
-PERSONAL_MONTH_INTERPRETATIONS = {
-    1: {"title": "Личный месяц 1.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    2: {"title": "Личный месяц 2.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    3: {"title": "Личный месяц 3.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    4: {"title": "Личный месяц 4.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    5: {"title": "Личный месяц 5.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    6: {"title": "Личный месяц 6.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    7: {"title": "Личный месяц 7.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    8: {"title": "Личный месяц 8.", "description": "…", "recommendations": "…", "if_not_used": "…"},
-    9: {"title": "Личный месяц 9.", "description": "…", "recommendations": "…", "if_not_used": "…"},
+DEFAULT_PERSONAL_YEAR_INTERPRETATIONS = {
+    1: {"title": "Личный год 1 — Начало нового цикла", "description": "Год новых возможностей, инициатив и стартов. Формируется вектор на ближайшие 9 лет.", "recommendations": "Начинайте проекты, принимайте решения, действуйте самостоятельно.", "if_not_used": "Ощущение застоя, упущенные возможности, отсутствие направления."},
+    2: {"title": "Личный год 2 — Партнёрство и ожидание", "description": "Год взаимодействия, терпения и эмоциональной чувствительности.", "recommendations": "Учитесь сотрудничать, договариваться, выстраивать отношения.", "if_not_used": "Зависимость от чужого мнения, внутренние конфликты."},
+    3: {"title": "Личный год 3 — Самовыражение", "description": "Год творчества, общения, публичности и радости.", "recommendations": "Проявляйте себя, развивайте таланты, расширяйте круг общения.", "if_not_used": "Разбросанность, пустая трата энергии."},
+    4: {"title": "Личный год 4 — Структура и фундамент", "description": "Год труда, дисциплины и создания устойчивой базы.", "recommendations": "Наводите порядок, стройте систему, работайте на результат.", "if_not_used": "Перегрузка, ощущение тяжести и стагнации."},
+    5: {"title": "Личный год 5 — Перемены", "description": "Год свободы, изменений и неожиданных поворотов.", "recommendations": "Будьте гибкими, открытыми к новому, путешествуйте.", "if_not_used": "Хаос, нестабильность, импульсивные ошибки."},
+    6: {"title": "Личный год 6 — Ответственность", "description": "Год семьи, заботы и гармонизации жизни.", "recommendations": "Уделяйте внимание близким, дому, здоровью.", "if_not_used": "Чувство долга без радости, эмоциональное выгорание."},
+    7: {"title": "Личный год 7 — Осмысление", "description": "Год внутреннего роста, анализа и поиска смысла.", "recommendations": "Учитесь, исследуйте, развивайтесь.", "if_not_used": "Изоляция, сомнения, потеря мотивации."},
+    8: {"title": "Личный год 8 — Реализация", "description": "Год денег, карьеры, управления и результатов.", "recommendations": "Берите ответственность, управляйте ресурсами, укрепляйте финансы.", "if_not_used": "Финансовые сложности, конфликты из-за контроля."},
+    9: {"title": "Личный год 9 — Завершение", "description": "Год подведения итогов и освобождения от прошлого.", "recommendations": "Завершайте дела, отпускайте старое, готовьтесь к новому циклу.", "if_not_used": "Застревание в прошлом, эмоциональная тяжесть."},
 }
 
-PERSONAL_DAY_INTERPRETATIONS = {
-    1: "…", 2: "…", 3: "…", 4: "…", 5: "…", 6: "…", 7: "…", 8: "…", 9: "…"
+DEFAULT_PERSONAL_MONTH_INTERPRETATIONS = {
+    1: {"title": "Личный месяц 1", "description": "Месяц инициативы и новых шагов.", "recommendations": "Начинайте, пробуйте, действуйте.", "if_not_used": "Прокрастинация, упущенные возможности."},
+    2: {"title": "Личный месяц 2", "description": "Месяц партнёрства и чувств.", "recommendations": "Проявляйте мягкость и терпение.", "if_not_used": "Обида, зависимость от других."},
+    3: {"title": "Личный месяц 3", "description": "Месяц общения и творчества.", "recommendations": "Говорите, проявляйтесь, общайтесь.", "if_not_used": "Поверхностность, суета."},
+    4: {"title": "Личный месяц 4", "description": "Месяц дисциплины и работы.", "recommendations": "Наводите порядок, фокусируйтесь.", "if_not_used": "Усталость, перегрузка."},
+    5: {"title": "Личный месяц 5", "description": "Месяц перемен и свободы.", "recommendations": "Будьте гибкими и открытыми.", "if_not_used": "Импульсивность, нестабильность."},
+    6: {"title": "Личный месяц 6", "description": "Месяц семьи и ответственности.", "recommendations": "Заботьтесь о близких и себе.", "if_not_used": "Чувство долга без радости."},
+    7: {"title": "Личный месяц 7", "description": "Месяц размышлений и анализа.", "recommendations": "Замедляйтесь и осмысливайте.", "if_not_used": "Замкнутость, сомнения."},
+    8: {"title": "Личный месяц 8", "description": "Месяц денег и результатов.", "recommendations": "Смело берите ответственность.", "if_not_used": "Конфликты из-за контроля."},
+    9: {"title": "Личный месяц 9", "description": "Месяц завершений.", "recommendations": "Закрывайте дела и отпускайте.", "if_not_used": "Эмоциональная тяжесть."},
 }
 
 # =========================
-# БД (SQLite) — быстро и просто
+# GOOGLE SHEETS ЗАГРУЗКА + КЭШ + FALLBACK
+# =========================
+_TEXT_CACHE: Dict[str, Any] = {"loaded_at": 0, "data": None}
+
+def _gs_client() -> gspread.Client:
+    if not GOOGLE_SA_JSON:
+        raise ValueError("GOOGLE_SA_JSON is not set")
+    info = json.loads(GOOGLE_SA_JSON)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    return gspread.authorize(creds)
+
+def _normalize_key(raw: Any) -> Any:
+    s = str(raw).strip()
+    if s.isdigit():
+        return int(s)
+    return s
+
+def _read_kv_sheet(sh: gspread.Spreadsheet, sheet_name: str) -> Dict[Any, str]:
+    ws = sh.worksheet(sheet_name)
+    rows = ws.get_all_records()  # headers in first row
+    out: Dict[Any, str] = {}
+    for r in rows:
+        k = _normalize_key(r.get("key", ""))
+        v = str(r.get("text", "")).strip()
+        if k == "" or k is None:
+            continue
+        if v == "":
+            continue
+        out[k] = v
+    return out
+
+def _read_struct_sheet(sh: gspread.Spreadsheet, sheet_name: str) -> Dict[int, Dict[str, str]]:
+    ws = sh.worksheet(sheet_name)
+    rows = ws.get_all_records()
+    out: Dict[int, Dict[str, str]] = {}
+    for r in rows:
+        k = _normalize_key(r.get("key", ""))
+        if not isinstance(k, int):
+            continue
+        out[k] = {
+            "title": str(r.get("title", "")).strip(),
+            "description": str(r.get("description", "")).strip(),
+            "recommendations": str(r.get("recommendations", "")).strip(),
+            "if_not_used": str(r.get("if_not_used", "")).strip(),
+        }
+    return out
+
+def default_texts() -> Dict[str, Any]:
+    return {
+        "GENERAL_DAY_INTERPRETATIONS": DEFAULT_GENERAL_DAY_INTERPRETATIONS,
+        "PERSONAL_DAY_INTERPRETATIONS": DEFAULT_PERSONAL_DAY_INTERPRETATIONS,
+        "PERSONAL_YEAR_INTERPRETATIONS": DEFAULT_PERSONAL_YEAR_INTERPRETATIONS,
+        "PERSONAL_MONTH_INTERPRETATIONS": DEFAULT_PERSONAL_MONTH_INTERPRETATIONS,
+    }
+
+def load_texts(force: bool = False) -> Dict[str, Any]:
+    now = int(pytime.time())
+    if (not force) and _TEXT_CACHE["data"] and (now - _TEXT_CACHE["loaded_at"] < TEXT_CACHE_TTL_SECONDS):
+        return _TEXT_CACHE["data"]
+
+    # если Sheets не настроен — сразу fallback
+    if not GSHEET_ID or not GOOGLE_SA_JSON:
+        data = default_texts()
+        _TEXT_CACHE["data"] = data
+        _TEXT_CACHE["loaded_at"] = now
+        return data
+
+    try:
+        gc = _gs_client()
+        sh = gc.open_by_key(GSHEET_ID)
+
+        data = {
+            "GENERAL_DAY_INTERPRETATIONS": _read_kv_sheet(sh, "general_day"),
+            "PERSONAL_DAY_INTERPRETATIONS": _read_kv_sheet(sh, "personal_day"),
+            "PERSONAL_YEAR_INTERPRETATIONS": _read_struct_sheet(sh, "personal_year"),
+            "PERSONAL_MONTH_INTERPRETATIONS": _read_struct_sheet(sh, "personal_month"),
+        }
+
+        # минимальная проверка: если пусто — не ломаемся, а fallback
+        if not data["PERSONAL_DAY_INTERPRETATIONS"] or not data["GENERAL_DAY_INTERPRETATIONS"]:
+            raise ValueError("Sheets returned empty critical dictionaries")
+
+        _TEXT_CACHE["data"] = data
+        _TEXT_CACHE["loaded_at"] = now
+        logger.info("Texts loaded from Google Sheets.")
+        return data
+
+    except Exception as e:
+        logger.exception("Failed to load texts from Google Sheets, using fallback. Reason: %s", e)
+        data = default_texts()
+        _TEXT_CACHE["data"] = data
+        _TEXT_CACHE["loaded_at"] = now
+        return data
+
+# =========================
+# БД (SQLite)
 # =========================
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
@@ -100,7 +224,7 @@ def db_init() -> None:
         )
         conn.commit()
 
-def db_get_user(user_id: int):
+def db_get_user(user_id: int) -> Optional[Tuple[int, str, int]]:
     with db_connect() as conn:
         cur = conn.execute("SELECT user_id, birth_date, subscribed FROM users WHERE user_id = ?", (user_id,))
         row = cur.fetchone()
@@ -122,11 +246,9 @@ def db_set_subscribed(user_id: int, subscribed: bool) -> None:
     with db_connect() as conn:
         conn.execute(
             """
-            INSERT INTO users(user_id, birth_date, subscribed)
-            VALUES (?, '01.01.2000', ?)
-            ON CONFLICT(user_id) DO UPDATE SET subscribed=excluded.subscribed
+            UPDATE users SET subscribed = ? WHERE user_id = ?
             """,
-            (user_id, 1 if subscribed else 0),
+            (1 if subscribed else 0, user_id),
         )
         conn.commit()
 
@@ -148,7 +270,6 @@ def reduce_to_single_digit(number_str: str) -> int:
     return s
 
 def calculate_general_day(today: datetime) -> int:
-    # сумма всех цифр даты ДД.ММ.ГГГГ
     return reduce_to_single_digit(today.strftime("%d.%m.%Y"))
 
 def calculate_personal_year(birth_date: datetime, today: datetime) -> int:
@@ -160,13 +281,20 @@ def calculate_personal_month(personal_year: int, today: datetime) -> int:
     return reduce_to_single_digit(str(personal_year + month_digit))
 
 def calculate_personal_day(personal_month: int, today: datetime) -> int:
-    day_digit = reduce_to_single_digit(today.strftime("%d"))  # 29->2, 30->3 и т.д.
+    day_digit = reduce_to_single_digit(today.strftime("%d"))  # 29->2, 30->3
     return reduce_to_single_digit(str(personal_month + day_digit))
 
 # =========================
 # ФОРМАТИРОВАНИЕ ВЫВОДА
 # =========================
 def build_result_message(birth_date_str: str, now_dt: datetime) -> str:
+    texts = load_texts()
+
+    GENERAL_DAY_INTERPRETATIONS = texts["GENERAL_DAY_INTERPRETATIONS"]
+    PERSONAL_DAY_INTERPRETATIONS = texts["PERSONAL_DAY_INTERPRETATIONS"]
+    PERSONAL_YEAR_INTERPRETATIONS = texts["PERSONAL_YEAR_INTERPRETATIONS"]
+    PERSONAL_MONTH_INTERPRETATIONS = texts["PERSONAL_MONTH_INTERPRETATIONS"]
+
     birth_dt = datetime.strptime(birth_date_str, "%d.%m.%Y")
 
     general_day = calculate_general_day(now_dt)
@@ -174,9 +302,9 @@ def build_result_message(birth_date_str: str, now_dt: datetime) -> str:
     personal_month = calculate_personal_month(personal_year, now_dt)
     personal_day = calculate_personal_day(personal_month, now_dt)
 
-    # трактовка общего дня
+    # общий день трактовка
     if now_dt.day in UNFAVORABLE_DAYS:
-        general_desc = GENERAL_DAY_INTERPRETATIONS["unfavorable"]
+        general_desc = GENERAL_DAY_INTERPRETATIONS.get("unfavorable", DEFAULT_GENERAL_DAY_INTERPRETATIONS["unfavorable"])
     else:
         general_desc = GENERAL_DAY_INTERPRETATIONS.get(general_day, "")
 
@@ -196,7 +324,7 @@ def build_result_message(birth_date_str: str, now_dt: datetime) -> str:
     if personal_day_desc:
         lines.append(f"<b>Трактовка личного дня {personal_day}:</b> {personal_day_desc}")
 
-    # Полные описания ЛГ/ЛМ — только 1-го числа
+    # Полные тексты ЛГ/ЛМ — только 1-го числа
     if now_dt.day == 1:
         py = PERSONAL_YEAR_INTERPRETATIONS.get(personal_year)
         pm = PERSONAL_MONTH_INTERPRETATIONS.get(personal_month)
@@ -208,37 +336,33 @@ def build_result_message(birth_date_str: str, now_dt: datetime) -> str:
 
         if py:
             lines.append("")
-            lines.append(f"<b>{py.get('title','')}</b>")
-            desc = py.get("description", "")
-            rec = py.get("recommendations", "")
-            bad = py.get("if_not_used", "")
-            if desc:
-                lines.append(desc)
-            if rec:
+            if py.get("title"):
+                lines.append(f"<b>{py.get('title')}</b>")
+            if py.get("description"):
+                lines.append(py.get("description"))
+            if py.get("recommendations"):
                 lines.append("")
                 lines.append("<b>Рекомендации:</b>")
-                lines.append(rec)
-            if bad:
+                lines.append(py.get("recommendations"))
+            if py.get("if_not_used"):
                 lines.append("")
                 lines.append("<b>Если не проживать энергию:</b>")
-                lines.append(bad)
+                lines.append(py.get("if_not_used"))
 
         if pm:
             lines.append("")
-            lines.append(f"<b>{pm.get('title','')}</b>")
-            desc = pm.get("description", "")
-            rec = pm.get("recommendations", "")
-            bad = pm.get("if_not_used", "")
-            if desc:
-                lines.append(desc)
-            if rec:
+            if pm.get("title"):
+                lines.append(f"<b>{pm.get('title')}</b>")
+            if pm.get("description"):
+                lines.append(pm.get("description"))
+            if pm.get("recommendations"):
                 lines.append("")
                 lines.append("<b>Рекомендации:</b>")
-                lines.append(rec)
-            if bad:
+                lines.append(pm.get("recommendations"))
+            if pm.get("if_not_used"):
                 lines.append("")
                 lines.append("<b>Если не проживать энергию:</b>")
-                lines.append(bad)
+                lines.append(pm.get("if_not_used"))
 
     return "\n".join(lines)
 
@@ -252,20 +376,24 @@ def menu_keyboard(subscribed: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 # =========================
-# ДИАЛОГИ (Conversation)
+# ДИАЛОГИ
 # =========================
 ASK_BIRTHDATE = 1
+
+def parse_birthdate_strict(text: str) -> str:
+    dt = datetime.strptime(text.strip(), "%d.%m.%Y")
+    now = datetime.now(TZ)
+    if dt.date() > now.date():
+        raise ValueError("Birth date is in the future.")
+    return dt.strftime("%d.%m.%Y")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     row = db_get_user(user_id)
 
     if row:
-        _, birth_date, subscribed = row
-        await update.message.reply_text(
-            "Меню:",
-            reply_markup=menu_keyboard(bool(subscribed)),
-        )
+        _, _, subscribed = row
+        await update.message.reply_text("Меню:", reply_markup=menu_keyboard(bool(subscribed)))
         return ConversationHandler.END
 
     await update.message.reply_text(
@@ -273,15 +401,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         parse_mode=ParseMode.HTML,
     )
     return ASK_BIRTHDATE
-
-def parse_birthdate_strict(text: str) -> str:
-    # строгий формат и реальная дата
-    dt = datetime.strptime(text.strip(), "%d.%m.%Y")
-    # логичная проверка: ДР не в будущем
-    now = datetime.now(TZ)
-    if dt.date() > now.date():
-        raise ValueError("Birth date is in the future.")
-    return dt.strftime("%d.%m.%Y")
 
 async def set_birthdate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
@@ -302,6 +421,7 @@ async def set_birthdate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     msg = build_result_message(birth_str, now_dt)
 
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
     row = db_get_user(user_id)
     subscribed = bool(row[2]) if row else False
     await update.message.reply_text("Меню:", reply_markup=menu_keyboard(subscribed))
@@ -332,7 +452,6 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Введите новую дату рождения в формате <b>ДД.ММ.ГГГГ</b> (пример: 05.03.1994).",
             parse_mode=ParseMode.HTML,
         )
-        # переключаемся в режим ожидания даты рождения
         context.user_data["awaiting_birthdate"] = True
         return
 
@@ -347,10 +466,6 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Ловим текст вне ConversationHandler:
-    - если пользователь нажал "Изменить дату рождения", ждём дату тут.
-    """
     if not context.user_data.get("awaiting_birthdate"):
         await update.message.reply_text("Используйте меню: /start")
         return
@@ -379,6 +494,18 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text("Меню:", reply_markup=menu_keyboard(subscribed))
 
 # =========================
+# ADMIN: RELOAD TEXTS
+# =========================
+async def reload_texts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if ADMIN_USER_IDS and user_id not in ADMIN_USER_IDS:
+        await update.message.reply_text("❌ Нет доступа.")
+        return
+
+    load_texts(force=True)
+    await update.message.reply_text("✅ Тексты перезагружены (или применён fallback).")
+
+# =========================
 # ЕЖЕДНЕВНАЯ РАССЫЛКА
 # =========================
 async def daily_broadcast(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -403,9 +530,11 @@ async def daily_broadcast(context: ContextTypes.DEFAULT_TYPE) -> None:
 def main() -> None:
     db_init()
 
+    # прогреем кэш (необязательно, но полезно)
+    _ = load_texts(force=False)
+
     app = Application.builder().token(TOKEN).build()
 
-    # Conversation только для первого ввода даты рождения через /start
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={ASK_BIRTHDATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_birthdate)]},
@@ -414,10 +543,15 @@ def main() -> None:
 
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(on_menu))
+    app.add_handler(CommandHandler("reload_texts", reload_texts))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
-    # Запланируем рассылку каждый день в 09:00 по Asia/Almaty
-    app.job_queue.run_daily(daily_broadcast, time=time(9, 0, tzinfo=TZ), name="daily_broadcast")
+    # Рассылка каждый день в 09:00 (Asia/Almaty)
+    app.job_queue.run_daily(
+        daily_broadcast,
+        time=time(9, 0, tzinfo=TZ),
+        name="daily_broadcast",
+    )
 
     logger.info("Bot started.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
