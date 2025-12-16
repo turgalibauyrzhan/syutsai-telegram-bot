@@ -1,13 +1,7 @@
-# =========================
-# SYUCAI TELEGRAM BOT
-# Final stable version
-# =========================
-
 import os
 import json
 import base64
 import logging
-import asyncio
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 
@@ -25,9 +19,7 @@ from telegram.ext import (
     filters,
 )
 
-# =========================
-# CONFIG
-# =========================
+# ================= CONFIG =================
 
 TZ = ZoneInfo("Asia/Almaty")
 
@@ -36,18 +28,12 @@ GSHEET_ID = os.getenv("GSHEET_ID")
 GOOGLE_SA_JSON = os.getenv("GOOGLE_SA_JSON")
 TRIAL_DAYS = 3
 
-ADMIN_CHAT_IDS = {
-    int(x) for x in os.getenv("ADMIN_CHAT_IDS", "").split(",") if x.strip().isdigit()
-}
-
 SHEET_NAME = "subscriptions"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("syucai")
 
-# =========================
-# NUMEROLOGY TEXTS (DOC)
-# =========================
+# ================= TEXTS =================
 
 UNFAVORABLE_DAYS = [10, 20, 30]
 UNFAVORABLE_TEXT = (
@@ -59,65 +45,61 @@ UNFAVORABLE_TEXT = (
 GENERAL_DAY = {
     1: "День перезапуска и обнуления. Важно не спешить с новыми решениями.",
     2: "День взаимодействия, чувствительности и дипломатии.",
-    3: "Благоприятный день анализа и успеха.",
-    4: "День мистических событий. Важно быть в позитиве.",
+    3: "День анализа и успеха.",
+    4: "День мистических событий, важно быть в позитиве.",
     5: "День перемен и движения.",
-    6: "Благоприятный день любви и гармонии.",
+    6: "День любви и гармонии.",
     7: "День анализа, тишины и глубины.",
+    8: "День ресурсов и денег.",
+    9: "День завершений и подведения итогов.",
+}
+
+PERSONAL_DAY_FULL = {
+    1: "День инициативы. Хорошо начинать новые дела.",
+    2: "День отношений. Важно проявлять мягкость.",
+    3: "День общения и творчества.",
+    4: (
+        "День мистических событий, как положительных, так и отрицательных. "
+        "Важно сохранять позитивное мышление. "
+        "Посвяти день целям и мечтам, визуализируй их."
+    ),
+    5: "День перемен и гибкости.",
+    6: "День любви, семьи и ответственности.",
+    7: "День анализа, тишины и фокуса.",
     8: "День ресурсов, денег и управления.",
     9: "День завершений и подведения итогов.",
 }
 
-PERSONAL_DAY = {
-    1: "Инициатива и старт.",
-    2: "Отношения и мягкость.",
-    3: "Общение и творчество.",
-    4: "Мистические события, визуализация целей.",
-    5: "Изменения и гибкость.",
-    6: "Любовь и ответственность.",
-    7: "Анализ и уединение.",
-    8: "День ресурсов и денег.",
-    9: "Завершения и итоги.",
+PERSONAL_YEAR_FULL = {
+    1: "Год начала нового цикла. Формирование направления жизни.",
+    2: "Год отношений, дипломатии и партнёрства.",
+    3: "Год анализа и успеха. Важно действовать осознанно.",
+    4: "Год мистических событий и внутренних трансформаций.",
+    5: "Год перемен, движения и свободы.",
+    6: "Год любви, семьи и ответственности.",
+    7: "Год глубины, обучения и внутреннего роста.",
+    8: "Год денег, управления и карьеры.",
+    9: "Год завершений и подведения итогов.",
 }
 
-PERSONAL_YEAR_SHORT = {
-    1: "Начало нового цикла.",
-    2: "Год отношений.",
-    3: "Год анализа и успеха.",
-    4: "Год внутренних трансформаций.",
-    5: "Год перемен.",
-    6: "Год семьи и любви.",
-    7: "Год глубины.",
-    8: "Год денег и управления.",
-    9: "Год завершений.",
-}
-
-PERSONAL_MONTH_SHORT = {
-    1: "Месяц стартов.",
-    2: "Месяц отношений.",
-    3: "Месяц общения.",
-    4: "Месяц мистики.",
-    5: "Месяц движения.",
-    6: "Месяц семьи.",
-    7: "Месяц анализа.",
-    8: "Месяц ресурсов.",
+PERSONAL_MONTH_FULL = {
+    1: "Месяц стартов и инициатив.",
+    2: "Месяц отношений и взаимодействия.",
+    3: "Месяц общения и самовыражения.",
+    4: "Месяц мистических процессов.",
+    5: "Месяц движения и изменений.",
+    6: "Месяц семьи и заботы.",
+    7: "Месяц анализа и тишины.",
+    8: "Месяц ресурсов и финансов.",
     9: "Месяц завершений.",
 }
 
-# =========================
-# HELPERS
-# =========================
+# ================= CALC =================
 
 def reduce_digit(n: int) -> int:
     while n > 9:
         n = sum(map(int, str(n)))
     return n
-
-def parse_date(s: str):
-    try:
-        return datetime.strptime(s, "%d.%m.%Y").date()
-    except:
-        return None
 
 def calc_general_day(d: date):
     return reduce_digit(sum(map(int, f"{d.day:02d}{d.month:02d}{d.year}")))
@@ -132,11 +114,9 @@ def calc_personal_month(py: int, m: int):
 def calc_personal_day(pm: int, d: int):
     return reduce_digit(pm + reduce_digit(d))
 
-# =========================
-# GOOGLE SHEETS
-# =========================
+# ================= GOOGLE SHEETS =================
 
-def gs_client():
+def gs_ws():
     raw = GOOGLE_SA_JSON
     try:
         raw = base64.b64decode(raw).decode()
@@ -146,16 +126,12 @@ def gs_client():
         json.loads(raw),
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
-    return gspread.authorize(creds)
-
-def get_ws():
-    sh = gs_client().open_by_key(GSHEET_ID)
-    return sh.worksheet(SHEET_NAME)
+    return gspread.authorize(creds).open_by_key(GSHEET_ID).worksheet(SHEET_NAME)
 
 def ensure_user(user):
-    ws = get_ws()
-    users = ws.get_all_records()
-    for i, r in enumerate(users, start=2):
+    ws = gs_ws()
+    rows = ws.get_all_records()
+    for i, r in enumerate(rows, start=2):
         if str(r["telegram_user_id"]) == str(user.id):
             return r, i
 
@@ -165,7 +141,7 @@ def ensure_user(user):
         "trial",
         (date.today() + timedelta(days=TRIAL_DAYS)).isoformat(),
         "",
-        date.today().isoformat()
+        date.today().isoformat(),  # registered_on
     ])
     return None, None
 
@@ -180,11 +156,11 @@ def access_level(rec):
         return "trial"
     return "blocked"
 
-# =========================
-# MESSAGE BUILD
-# =========================
+# ================= MESSAGE =================
 
-def build_message(rec, birth, today, first_day):
+def build_message(rec, birth, today):
+    first_day = rec["registered_on"] == today.isoformat()
+
     py = calc_personal_year(birth, today.year)
     pm = calc_personal_month(py, today.month)
     ld = calc_personal_day(pm, today.day)
@@ -197,21 +173,26 @@ def build_message(rec, birth, today, first_day):
         od = calc_general_day(today)
         parts.append(f"\n🌐 Общий день: {od}\n{GENERAL_DAY[od]}")
 
-    parts.append(f"\n🗓 Личный год {py}. {PERSONAL_YEAR_SHORT[py]}")
-    parts.append(f"🗓 Личный месяц {pm}. {PERSONAL_MONTH_SHORT[pm]}")
-    parts.append(f"\n🔢 Личный день {ld}. {PERSONAL_DAY[ld]}")
+    # Личный год
+    parts.append(f"\n🗓 Личный год {py}.")
+    parts.append(PERSONAL_YEAR_FULL[py] if first_day else PERSONAL_YEAR_FULL[py].split(".")[0])
+
+    # Личный месяц
+    parts.append(f"\n🗓 Личный месяц {pm}.")
+    parts.append(PERSONAL_MONTH_FULL[pm] if first_day else PERSONAL_MONTH_FULL[pm].split(".")[0])
+
+    # Личный день — всегда расширенно
+    parts.append(f"\n🔢 Личный день {ld}.")
+    parts.append(PERSONAL_DAY_FULL[ld])
 
     return "\n".join(parts)
 
-# =========================
-# HANDLERS
-# =========================
+# ================= HANDLERS =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     rec, row = ensure_user(user)
-
-    ws = get_ws()
+    ws = gs_ws()
     if not rec:
         rec = ws.get_all_records()[-1]
 
@@ -219,31 +200,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введите дату рождения (ДД.ММ.ГГГГ)")
         return
 
-    level = access_level(rec)
-    if level == "blocked":
+    if access_level(rec) == "blocked":
         await update.message.reply_text("⛔️ Доступ ограничен.")
         return
 
-    today = date.today()
-    msg = build_message(rec, rec["birth_date"], today, False)
+    msg = build_message(rec, rec["birth_date"], date.today())
     await update.message.reply_text(msg)
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    birth = parse_date(update.message.text)
-    if not birth:
-        await update.message.reply_text("Неверный формат.")
+    try:
+        birth = datetime.strptime(update.message.text, "%d.%m.%Y").strftime("%d.%m.%Y")
+    except:
+        await update.message.reply_text("Неверный формат даты.")
         return
 
-    ws = get_ws()
+    ws = gs_ws()
     rec, row = ensure_user(user)
-    ws.update_cell(row, 5, birth.strftime("%d.%m.%Y"))
-
+    ws.update_cell(row, 5, birth)
     await start(update, context)
 
-# =========================
-# MAIN
-# =========================
+# ================= MAIN =================
 
 def main():
     app = Application.builder().token(TOKEN).build()
