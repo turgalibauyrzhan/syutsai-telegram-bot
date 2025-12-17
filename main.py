@@ -702,6 +702,7 @@ async def daily_broadcast(context: ContextTypes.DEFAULT_TYPE) -> None:
 # MAIN
 # =========================
 def main() -> None:
+    log.info("ENV CHECK: GOOGLE_SA_JSON_len=%d", len(os.getenv("GOOGLE_SA_JSON","").strip()))
     log.info("ENV CHECK: GSHEET_ID=%r SUBS_SHEET_NAME=%r GOOGLE_SA_JSON_len=%d",
          os.getenv("GSHEET_ID", ""), os.getenv("SUBS_SHEET_NAME", ""), len(os.getenv("GOOGLE_SA_JSON","").strip()))
 
