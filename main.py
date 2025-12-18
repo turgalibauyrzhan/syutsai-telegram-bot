@@ -1,200 +1,179 @@
-import os
-import sys
-import json
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Syucai Telegram bot (Render-friendly, webhook-first)
+
+Исправления:
+- Уходим от getUpdates => webhook (никаких 409 Conflict).
+- Парсер Google Service Account:
+  * GOOGLE_SA_JSON (просто JSON строкой) ИЛИ
+  * GOOGLE_SA_JSON_B64 (base64 одной строкой)
+  * также ловим частую ошибку: base64 по ошибке положили в GOOGLE_SA_JSON.
+- Trial 3 дня (как Premium). 1-й день — полный разбор; далее — коротко.
+- Ежедневная рассылка в 09:00 Asia/Almaty (JobQueue PTB).
+"""
+
+from __future__ import annotations
+
+import asyncio
 import base64
+import json
 import logging
+import os
+import re
 from dataclasses import dataclass
-from datetime import datetime, date, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
-
-import gspread
-from google.oauth2.service_account import Credentials
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from datetime import datetime, date, time, timedelta
+from typing import Any, Dict, Optional, Tuple, List
+from zoneinfo import ZoneInfo
 
 from telegram import Update
-from telegram.constants import ParseMode
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
+    Application, CommandHandler, MessageHandler, ContextTypes,
+    filters
 )
 
-# ----------------------------
-# Logging
-# ----------------------------
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+# ---- Google Sheets deps ----
+try:
+    import gspread  # type: ignore
+    from google.oauth2.service_account import Credentials  # type: ignore
+except Exception:
+    gspread = None
+    Credentials = None
+
+
+LOGGER = logging.getLogger("syucai")
 logging.basicConfig(
-    level=LOG_LEVEL,
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s - syucai - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger("syucai")
 
-KZT_TZ = timezone(timedelta(hours=5))  # Asia/Almaty ~ UTC+5 (без DST)
+TZ = ZoneInfo("Asia/Almaty")
 
 
-# ----------------------------
-# Config
-# ----------------------------
-TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-GSHEET_ID = os.getenv("GSHEET_ID", "").strip()
-SUBS_SHEET_NAME = os.getenv("SUBS_SHEET_NAME", "subscriptions").strip()
+# =========================
+# Тексты (правь здесь)
+# =========================
 
-# Админы: "123,456"
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x.strip().isdigit()]
-
-# Render/Webhook base URL:
-# 1) WEBHOOK_BASE_URL = https://<your-service>.onrender.com
-# или
-# 2) RENDER_EXTERNAL_HOSTNAME = <your-service>.onrender.com  (Render часто даёт)
-WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip()
-RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
-
-PORT = int(os.getenv("PORT", "10000"))
-
-# Trial rules
-TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "3"))
-DAILY_PUSH_HOUR = int(os.getenv("DAILY_PUSH_HOUR", "9"))
-DAILY_PUSH_MINUTE = int(os.getenv("DAILY_PUSH_MINUTE", "0"))
-
-# ----------------------------
-# Text dictionaries (замени на твои финальные тексты)
-# ----------------------------
-TEXT_OD: Dict[int, str] = {
-    1: "День перезапуска и обнуления. Не спеши с новыми решениями, избегай крупных обязательств.",
-    2: "День дипломатии и баланса. Хорош для переговоров, примирения и аккуратных договорённостей.",
-    3: "День энергии и общения. Подходит для выступлений, знакомств и продвижения.",
-    4: "День структуры и дисциплины. Закрывай хвосты, наведи порядок, действуй по плану.",
-    5: "День перемен. Гибкость, движение, поездки, новые идеи — но без хаоса.",
-    6: "День семьи и гармонии. Хорош для дома, заботы, отношений и красоты.",
-    7: "День анализа и тишины. Фокус, обучение, внутренняя работа.",
-    8: "День ресурсов и денег. Практичность, сделки, рост эффективности.",
-    9: "День завершений. Закрывай циклы, подводи итоги, освобождай место новому.",
+TEXTS: Dict[str, Any] = {
+    "od": {  # Общий день (ОД)
+        1: "Не желательно начинать новые проекты и события. Есть высокая вероятность обнуления всех результатов ваших действий. Рекомендуется отложить на другой день крупные покупки, договоры, кредиты и т.д.",
+        2: "День мягкой силы: переговоры, примирение, аккуратные решения. Не давите — договаривайтесь.",
+        3: "День удачи, простых решений и быстрых результатов. Хорош для стартов, поездок, встреч, общения.",
+        4: "День дисциплины и структуры. Лучше закрывать хвосты, наводить порядок, работать по плану.",
+        5: "День перемен. Возможны резкие повороты, новости, смена планов. Будьте гибкими.",
+        6: "День семьи, заботы, дома и гармонии. Хорошо решать бытовые вопросы и укреплять отношения.",
+        7: "День анализа, тишины, фокуса и глубины. Подходит для обучения, размышлений, планирования.",
+        8: "День ресурсов и денег. Хорошо решать финансовые вопросы, договариваться о выгоде.",
+        9: "День завершений и подведения итогов. Хорошо закрывать дела и отпускать лишнее.",
+    },
+    "ld": {  # Личный день (ЛД)
+        1: "День решения и лидерства. Делайте первый шаг, но без лишней агрессии.",
+        2: "День чувств и контакта. Полезны переговоры, совместные дела, примирения.",
+        3: "День общения и креатива. Подходит для знакомств, презентаций, контента.",
+        4: "День мистических событий, как положительных, так и отрицательных. Человек может испытывать чувство неудовлетворенности. Важно быть на позитиве, чтобы были положительные мистические события. Иначе могут быть мистические потери. Посвятить день целям и мечтам. Визуализируйте цели, позвольте мечтать без ограничений.",
+        5: "День мистических событий, как положительных, так и отрицательных. Человек может испытывать чувство неудовлетворенности. Важно быть на позитиве, чтобы были положительные мистические события. Иначе могут быть мистические потери. Посвятить день целям и мечтам. Визуализируйте цели, позвольте мечтать без ограничений.",
+        6: "День ответственности и заботы. Дом, семья, здоровье, полезные привычки.",
+        7: "ЛД=7 — анализ, тишина, фокус, глубина.",
+        8: "День ресурсов и денег.",
+        9: "День завершений: закрывайте долги, завершайте дела, фиксируйте результат.",
+    },
+    "lm_short": {  # Личный месяц - коротко
+        1: "Месяц стартов.",
+        2: "Месяц отношений и договоренностей.",
+        3: "Месяц общения и роста.",
+        4: "Месяц дисциплины и структуры.",
+        5: "Месяц перемен.",
+        6: "Месяц семьи и заботы.",
+        7: "Месяц глубины и обучения.",
+        8: "Месяц денег и ресурсов.",
+        9: "Месяц завершений.",
+    },
+    "lg_short": {  # Личный год - коротко
+        1: "Год стартов.",
+        2: "Год отношений и партнерств.",
+        3: "Год анализа и успеха.",
+        4: "Год дисциплины и фундамента.",
+        5: "Год перемен.",
+        6: "Год семьи и ответственности.",
+        7: "Год глубины.",
+        8: "Год денег и силы.",
+        9: "Год завершений.",
+    },
+    "lg_full": {  # Полное (на 1-й день full-доступа)
+        3: "Год анализа и успеха. Главная задача года — учиться, систематизировать знания и превращать их в результат. Важно выбрать 1–2 ключевые цели и идти вглубь, а не распыляться. Возможны заметные достижения, если действовать по плану и не лениться.",
+        7: "Год глубины. Период внутреннего роста: обучение, самоанализ, поиск смысла, перезагрузка целей. Важно не форсировать внешние события — лучше углубляться, укреплять компетенции и здоровье.",
+    },
+    "lm_full": {
+        2: "Месяц отношений и договоренностей. Фокус на общении, семье, партнерстве. Хорошо выравнивать конфликты, укреплять связи, договариваться о правилах и совместных планах. Плохо — давить и спорить из принципа.",
+        1: "Месяц стартов. Хорошо запускать новые привычки, начинать проекты, пробовать новое. Важно не распыляться и фиксировать прогресс.",
+    },
+    "special_dates": {
+        10: "🔟 10 число — день удачи и быстрых возможностей. Хорошо начинать дела, запускать инициативы, выходить на людей.",
+        20: "2️⃣0️⃣ 20 число — день партнерств и договоров. Хорошо обсуждать условия, мириться, укреплять связи.",
+        30: "3️⃣0️⃣ 30 число — день творчества и коммуникаций. Хорошо выступать, писать, создавать контент и идеи.",
+    },
+    "ui": {
+        "need_birth": "Чтобы считать ЛГ/ЛМ/ЛД, пришли дату рождения в формате ДД.ММ.ГГГГ (например 05.11.1992).",
+        "saved_birth": "✅ Дата рождения сохранена: {birth}.",
+        "trial_started": "🎁 Тебе активирован Trial на 3 дня. День 1 — полный разбор, далее — короткая версия.",
+        "trial_expired": "⛔️ Доступ ограничен.\nTrial закончился или доступ отключён.\nОбратитесь к администратору.",
+        "premium_active": "⭐️ Premium активен: полный прогноз доступен + ежедневка 09:00.",
+        "help": (
+            "Команды:\n"
+            "/start — регистрация\n"
+            "/status — статус доступа\n"
+            "/setbirth ДД.ММ.ГГГГ — сохранить дату рождения\n"
+            "/today — прогноз на сегодня\n"
+        ),
+    },
 }
 
-TEXT_LD: Dict[int, str] = {
-    1: "ЛД=1 — старт, инициатива, самостоятельность. Действуй первым.",
-    2: "ЛД=2 — мягкость, партнёрство, дипломатия. Делай вместе.",
-    3: "ЛД=3 — креатив, общение, самовыражение. Покажи себя.",
-    4: "ЛД=4 — порядок, дисциплина, фундамент. Делай шаг за шагом.",
-    5: "ЛД=5 — перемены, движение, свобода. Пробуй новое.",
-    6: "ЛД=6 — забота, отношения, дом. Восстанови гармонию.",
-    7: "ЛД=7 — анализ, тишина, фокус, глубина. Не распыляйся.",
-    8: "ЛД=8 — ресурсы и деньги. Думай прагматично.",
-    9: "ЛД=9 — завершения, прощание со старым. Закрой задачи.",
-}
 
-# Краткие описания для ЛГ/ЛМ (как ты и просил: в обычные дни кратко)
-TEXT_LG_SHORT: Dict[int, str] = {
-    1: "ЛГ=1 — год стартов.",
-    2: "ЛГ=2 — год партнёрства.",
-    3: "ЛГ=3 — год роста и коммуникации.",
-    4: "ЛГ=4 — год дисциплины и фундамента.",
-    5: "ЛГ=5 — год перемен.",
-    6: "ЛГ=6 — год семьи и гармонии.",
-    7: "ЛГ=7 — год глубины и анализа.",
-    8: "ЛГ=8 — год денег и результата.",
-    9: "ЛГ=9 — год завершений.",
-}
+# =========================
+# Numerology calc
+# =========================
 
-TEXT_LM_SHORT: Dict[int, str] = {
-    1: "ЛМ=1 — месяц стартов.",
-    2: "ЛМ=2 — месяц баланса и отношений.",
-    3: "ЛМ=3 — месяц общения.",
-    4: "ЛМ=4 — месяц порядка.",
-    5: "ЛМ=5 — месяц перемен.",
-    6: "ЛМ=6 — месяц семьи.",
-    7: "ЛМ=7 — месяц глубины.",
-    8: "ЛМ=8 — месяц денег.",
-    9: "ЛМ=9 — месяц завершений.",
-}
+def digit_sum(n: int) -> int:
+    s = 0
+    while n > 0:
+        s += n % 10
+        n //= 10
+    return s
 
+def reduce_1_9(n: int) -> int:
+    if n <= 0:
+        return 0
+    while n > 9:
+        n = digit_sum(n)
+    return n
 
-# ----------------------------
-# Helpers: stable GOOGLE_SA_JSON parser
-# ----------------------------
-def _looks_like_base64(s: str) -> bool:
-    if len(s) < 20:
-        return False
-    # часто base64 начинается на "ewog" (pretty JSON) или "eyJ" (compact JSON)
-    if s.startswith(("ewog", "eyJ", "ewo", "e30", "e1")):
-        return True
-    # грубая эвристика: только base64-символы
-    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r")
-    return all(ch in allowed for ch in s)
-
-
-def load_google_sa_json() -> Dict[str, Any]:
-    """
-    Поддерживает:
-    - GOOGLE_SA_JSON: plain JSON
-    - GOOGLE_SA_JSON: base64(JSON)
-    - GOOGLE_SA_JSON_B64: base64(JSON) (если хочешь хранить отдельно)
-    Никогда не падает "тихо": логирует причину.
-    """
-    raw_b64 = os.getenv("GOOGLE_SA_JSON_B64", "").strip()
-    raw = os.getenv("GOOGLE_SA_JSON", "").strip()
-
-    if raw_b64:
-        try:
-            decoded = base64.b64decode(raw_b64).decode("utf-8")
-            return json.loads(decoded)
-        except Exception as e:
-            logger.error("GOOGLE_SA_JSON_B64 decode failed: %s", e)
-            raise
-
-    if not raw:
-        raise ValueError("GOOGLE_SA_JSON is empty")
-
-    # 1) пробуем как JSON
+def parse_birth(s: str) -> Optional[date]:
+    m = re.fullmatch(r"\s*(\d{2})\.(\d{2})\.(\d{4})\s*", s)
+    if not m:
+        return None
+    dd, mm, yyyy = map(int, m.groups())
     try:
-        return json.loads(raw)
-    except Exception:
-        pass
+        return date(yyyy, mm, dd)
+    except ValueError:
+        return None
 
-    # 2) пробуем как base64(JSON)
-    if _looks_like_base64(raw):
-        try:
-            decoded = base64.b64decode(raw).decode("utf-8")
-            return json.loads(decoded)
-        except Exception as e:
-            logger.error("GOOGLE_SA_JSON base64 decode failed: %s", e)
-            raise
+def calc_personal_year(birth: date, today: date) -> int:
+    return reduce_1_9(reduce_1_9(birth.day) + reduce_1_9(birth.month) + reduce_1_9(today.year))
 
-    # 3) последний шанс: иногда в ENV ломают переносы/экранирование
-    # (например, вставили JSON с raw newline внутри строки)
-    # Тут уже честно — не магия: отдадим понятную ошибку.
-    raise ValueError("GOOGLE_SA_JSON is not valid JSON and not valid base64(JSON)")
+def calc_personal_month(personal_year: int, today: date) -> int:
+    return reduce_1_9(personal_year + reduce_1_9(today.month))
+
+def calc_personal_day(personal_month: int, today: date) -> int:
+    return reduce_1_9(personal_month + reduce_1_9(today.day))
+
+def calc_general_day(today: date) -> int:
+    return reduce_1_9(reduce_1_9(today.day) + reduce_1_9(today.month) + reduce_1_9(today.year))
 
 
-def make_gspread_client() -> gspread.Client:
-    sa = load_google_sa_json()
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(sa, scopes=scopes)
-    return gspread.authorize(creds)
-
-
-# ----------------------------
-# Google Sheets storage (subscriptions)
-# ----------------------------
-EXPECTED_HEADERS = [
-    "telegram_user_id",
-    "status",
-    "plan",
-    "trial_expires",
-    "birth_date",
-    "created_at",
-    "last_seen_at",
-    "username",
-    "first_name",
-    "last_name",
-    "registered_on",
-    "last_full_ym",
-]
+# =========================
+# Access model (Sheets)
+# =========================
 
 @dataclass
 class SubRow:
@@ -211,623 +190,475 @@ class SubRow:
     registered_on: str
     last_full_ym: str
 
+    @staticmethod
+    def headers() -> List[str]:
+        return [
+            "telegram_user_id", "status", "plan", "trial_expires", "birth_date",
+            "created_at", "last_seen_at", "username", "first_name", "last_name",
+            "registered_on", "last_full_ym",
+        ]
+
+def now_iso() -> str:
+    return datetime.now(TZ).replace(microsecond=0).isoformat()
+
+def today_iso() -> str:
+    return date.today().isoformat()
+
+def safe_int(s: Any, default: int = 0) -> int:
+    try:
+        return int(str(s).strip())
+    except Exception:
+        return default
+
+def iso_to_date(s: str) -> Optional[date]:
+    try:
+        return date.fromisoformat(s.strip())
+    except Exception:
+        return None
+
+def iso_to_dt(s: str) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(s.strip())
+    except Exception:
+        return None
+
+def compute_access(sub: SubRow, today: date) -> Tuple[bool, str]:
+    status = (sub.status or "").strip().lower()
+    plan = (sub.plan or "").strip().lower()
+
+    if status == "premium" or plan == "premium":
+        return True, "premium"
+
+    if status == "trial" or plan == "trial":
+        exp = iso_to_dt(sub.trial_expires)
+        if exp and exp.date() >= today:
+            return True, "trial"
+        return False, "expired"
+
+    return False, "restricted"
+
+
+# =========================
+# Google Sheets wrapper
+# =========================
 
 class SheetStore:
-    def __init__(self):
-        self.client: Optional[gspread.Client] = None
-        self.sheet = None
-        self.ws = None
-        self.headers: List[str] = []
+    def __init__(self) -> None:
+        self.enabled = False
+        self._client = None
+        self._ws = None
 
-    def ready(self) -> bool:
-        return self.ws is not None
+    def _parse_sa_json(self) -> Dict[str, Any]:
+        raw = (os.getenv("GOOGLE_SA_JSON") or "").strip()
+        raw_b64 = (os.getenv("GOOGLE_SA_JSON_B64") or "").strip()
 
-    def init(self) -> None:
-        if not GSHEET_ID:
-            raise ValueError("GSHEET_ID is empty")
-        self.client = make_gspread_client()
-        self.sheet = self.client.open_by_key(GSHEET_ID)
-        self.ws = self.sheet.worksheet(SUBS_SHEET_NAME)
+        if raw_b64:
+            decoded = base64.b64decode(raw_b64).decode("utf-8")
+            return json.loads(decoded)
 
-        self.headers = [h.strip() for h in self.ws.row_values(1)]
-        missing = [h for h in EXPECTED_HEADERS if h not in self.headers]
-        if missing:
-            raise ValueError(f"subscriptions header missing columns: {missing}")
+        if not raw:
+            raise RuntimeError("GOOGLE_SA_JSON is empty")
 
-    def _row_to_dicts(self) -> List[Dict[str, str]]:
-        values = self.ws.get_all_values()
-        if not values or len(values) < 2:
-            return []
-        hdr = values[0]
-        out = []
-        for r in values[1:]:
-            d = {hdr[i]: (r[i] if i < len(r) else "") for i in range(len(hdr))}
-            out.append(d)
-        return out
-
-    def get_user(self, user_id: int) -> Optional[Dict[str, str]]:
-        rows = self._row_to_dicts()
-        for d in rows:
-            if str(d.get("telegram_user_id", "")).strip() == str(user_id):
-                return d
-        return None
-
-    def upsert_user(self, sr: SubRow) -> None:
-        # find row index
-        rows = self.ws.get_all_values()
-        hdr = rows[0]
-        target_idx = None
-        for i, r in enumerate(rows[1:], start=2):
-            if len(r) > 0 and str(r[hdr.index("telegram_user_id")]).strip() == str(sr.telegram_user_id):
-                target_idx = i
-                break
-
-        data = {
-            "telegram_user_id": str(sr.telegram_user_id),
-            "status": sr.status,
-            "plan": sr.plan,
-            "trial_expires": sr.trial_expires,
-            "birth_date": sr.birth_date,
-            "created_at": sr.created_at,
-            "last_seen_at": sr.last_seen_at,
-            "username": sr.username,
-            "first_name": sr.first_name,
-            "last_name": sr.last_name,
-            "registered_on": sr.registered_on,
-            "last_full_ym": sr.last_full_ym,
-        }
-
-        row_values = [data.get(col, "") for col in hdr]
-
-        if target_idx is None:
-            self.ws.append_row(row_values, value_input_option="USER_ENTERED")
-        else:
-            # update entire row
-            self.ws.update(f"A{target_idx}:{chr(64+len(hdr))}{target_idx}", [row_values])
-
-    def set_plan(self, user_id: int, status: str, plan: str, trial_expires: str = "") -> None:
-        d = self.get_user(user_id)
-        if not d:
-            return
-        now = now_kzt().isoformat(sep=" ", timespec="seconds")
-        sr = SubRow(
-            telegram_user_id=user_id,
-            status=status,
-            plan=plan,
-            trial_expires=trial_expires or d.get("trial_expires", ""),
-            birth_date=d.get("birth_date", ""),
-            created_at=d.get("created_at", now),
-            last_seen_at=now,
-            username=d.get("username", ""),
-            first_name=d.get("first_name", ""),
-            last_name=d.get("last_name", ""),
-            registered_on=d.get("registered_on", ""),
-            last_full_ym=d.get("last_full_ym", ""),
-        )
-        self.upsert_user(sr)
-
-    def list_active_users_for_daily(self) -> List[int]:
-        rows = self._row_to_dicts()
-        ids: List[int] = []
-        today = date.today()
-        for d in rows:
+        # Частая ошибка: base64 положили в GOOGLE_SA_JSON
+        if re.fullmatch(r"[A-Za-z0-9+/=\s]+", raw) and raw.startswith(("ewog", "eyJ")):
             try:
-                uid = int(d.get("telegram_user_id", "0"))
-            except Exception:
-                continue
-            status = (d.get("status") or "").strip().lower()
-            plan = (d.get("plan") or "").strip().lower()
-            if status == "blocked":
-                continue
-
-            if plan == "premium":
-                ids.append(uid)
-                continue
-
-            if plan == "trial":
-                # только если ещё не истёк
-                te = (d.get("trial_expires") or "").strip()
-                if te:
-                    try:
-                        exp = datetime.fromisoformat(te).date()
-                        if today <= exp:
-                            ids.append(uid)
-                    except Exception:
-                        pass
-        return ids
-
-
-store = SheetStore()
-
-
-# ----------------------------
-# Numerology logic (простая и предсказуемая)
-# ----------------------------
-def digit_sum(n: int) -> int:
-    s = 0
-    for ch in str(abs(n)):
-        s += ord(ch) - 48
-    return s
-
-def reduce_1_9(n: int) -> int:
-    n = abs(n)
-    while n > 9:
-        n = digit_sum(n)
-    return n if n != 0 else 9
-
-def now_kzt() -> datetime:
-    return datetime.now(tz=KZT_TZ)
-
-def calc_general_day(d: date) -> int:
-    # Общий день: сумма дня+месяца+года → редукция 1..9
-    return reduce_1_9(d.day + d.month + d.year)
-
-def calc_personal_year(bd: date, today: date) -> int:
-    return reduce_1_9(bd.day + bd.month + today.year)
-
-def calc_personal_month(py: int, today: date) -> int:
-    return reduce_1_9(py + today.month)
-
-def calc_personal_day(pm: int, today: date) -> int:
-    return reduce_1_9(pm + today.day)
-
-def ym_key(d: date) -> str:
-    return f"{d.year:04d}-{d.month:02d}"
-
-
-# ----------------------------
-# Access logic
-# ----------------------------
-def parse_birth_date(s: str) -> Optional[date]:
-    s = (s or "").strip()
-    if not s:
-        return None
-    # accepted: YYYY-MM-DD or DD.MM.YYYY
-    try:
-        if "-" in s:
-            return datetime.fromisoformat(s).date()
-    except Exception:
-        pass
-    try:
-        if "." in s:
-            dd, mm, yy = s.split(".")
-            return date(int(yy), int(mm), int(dd))
-    except Exception:
-        return None
-    return None
-
-def trial_is_active(user_row: Dict[str, str], today: date) -> bool:
-    if (user_row.get("plan") or "").strip().lower() != "trial":
-        return False
-    if (user_row.get("status") or "").strip().lower() == "blocked":
-        return False
-    te = (user_row.get("trial_expires") or "").strip()
-    if not te:
-        return False
-    try:
-        exp = datetime.fromisoformat(te).date()
-        return today <= exp
-    except Exception:
-        return False
-
-def premium_is_active(user_row: Dict[str, str]) -> bool:
-    return (user_row.get("plan") or "").strip().lower() == "premium" and (user_row.get("status") or "").strip().lower() != "blocked"
-
-def should_full_message(user_row: Dict[str, str], today: date) -> bool:
-    """
-    - Premium: всегда full
-    - Trial: full только если trial активен:
-        - В первый день после регистрации: full
-        - дальше: short (как ты просил)
-      Но: ты попросил "полный доступ 3 дня как премиум" — это про функции,
-      а формат текста ты хотел: 1-й день полный, дальше короткий. Так и делаем.
-    """
-    if premium_is_active(user_row):
-        return True
-    if trial_is_active(user_row, today):
-        reg = (user_row.get("registered_on") or "").strip()
-        if reg:
-            try:
-                rdate = datetime.fromisoformat(reg).date()
-                return (today == rdate)
+                decoded = base64.b64decode(raw).decode("utf-8")
+                return json.loads(decoded)
             except Exception:
                 pass
-        # если нет registered_on — считаем первый день как "сегодня"
-        return True
-    return False
 
-def ensure_trial_expired_autoblock(user_row: Dict[str, str], today: date) -> Tuple[bool, Optional[str]]:
-    """
-    Возвращает (blocked_now, reason)
-    """
-    plan = (user_row.get("plan") or "").strip().lower()
-    status = (user_row.get("status") or "").strip().lower()
-    if plan != "trial" or status == "blocked":
-        return (False, None)
-    te = (user_row.get("trial_expires") or "").strip()
-    if not te:
-        return (False, None)
-    try:
-        exp = datetime.fromisoformat(te).date()
-        if today > exp:
-            return (True, "trial expired")
-    except Exception:
-        return (False, None)
-    return (False, None)
+        return json.loads(raw)
+
+    def init_sync(self) -> None:
+        if gspread is None or Credentials is None:
+            raise RuntimeError("gspread/google-auth not installed")
+
+        sa = self._parse_sa_json()
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = Credentials.from_service_account_info(sa, scopes=scopes)
+        self._client = gspread.authorize(creds)
+
+        sheet_id = (os.getenv("GSHEET_ID") or "").strip()
+        if not sheet_id:
+            raise RuntimeError("GSHEET_ID is empty")
+
+        sheet_name = (os.getenv("SUBS_SHEET_NAME") or "subscriptions").strip()
+        ws = self._client.open_by_key(sheet_id).worksheet(sheet_name)
+
+        headers = ws.row_values(1)
+        if not headers:
+            ws.append_row(SubRow.headers(), value_input_option="RAW")
+
+        self._ws = ws
+        self.enabled = True
+
+    async def init(self) -> None:
+        await asyncio.to_thread(self.init_sync)
+
+    def _require(self) -> None:
+        if not self.enabled or self._ws is None:
+            raise RuntimeError("Google Sheets not ready")
+
+    async def find_row_idx(self, telegram_user_id: int) -> Optional[int]:
+        self._require()
+        def _find() -> Optional[int]:
+            col = self._ws.col_values(1)
+            target = str(telegram_user_id)
+            for i, v in enumerate(col, start=1):
+                if str(v).strip() == target:
+                    return i
+            return None
+        return await asyncio.to_thread(_find)
+
+    async def get_row(self, telegram_user_id: int) -> Optional[SubRow]:
+        self._require()
+        idx = await self.find_row_idx(telegram_user_id)
+        if not idx:
+            return None
+
+        def _get() -> SubRow:
+            headers = self._ws.row_values(1)
+            values = self._ws.row_values(idx)
+            data = {headers[i]: (values[i] if i < len(values) else "") for i in range(len(headers))}
+            return SubRow(
+                telegram_user_id=safe_int(data.get("telegram_user_id", telegram_user_id)),
+                status=str(data.get("status", "") or ""),
+                plan=str(data.get("plan", "") or ""),
+                trial_expires=str(data.get("trial_expires", "") or ""),
+                birth_date=str(data.get("birth_date", "") or ""),
+                created_at=str(data.get("created_at", "") or ""),
+                last_seen_at=str(data.get("last_seen_at", "") or ""),
+                username=str(data.get("username", "") or ""),
+                first_name=str(data.get("first_name", "") or ""),
+                last_name=str(data.get("last_name", "") or ""),
+                registered_on=str(data.get("registered_on", "") or ""),
+                last_full_ym=str(data.get("last_full_ym", "") or ""),
+            )
+        return await asyncio.to_thread(_get)
+
+    async def upsert_user(self, update: Update, status: str, plan: str, trial_expires: str) -> SubRow:
+        self._require()
+        user = update.effective_user
+        assert user is not None
+        uid = user.id
+        now = now_iso()
+
+        existing = await self.get_row(uid)
+        if existing:
+            await self.touch_seen(uid)
+            return existing
+
+        def _append() -> SubRow:
+            headers = self._ws.row_values(1) or SubRow.headers()
+            if self._ws.row_values(1) == []:
+                self._ws.append_row(headers, value_input_option="RAW")
+
+            row_dict = {
+                "telegram_user_id": str(uid),
+                "status": status,
+                "plan": plan,
+                "trial_expires": trial_expires,
+                "birth_date": "",
+                "created_at": now,
+                "last_seen_at": now,
+                "username": user.username or "",
+                "first_name": user.first_name or "",
+                "last_name": user.last_name or "",
+                "registered_on": today_iso(),
+                "last_full_ym": "",
+            }
+            row = [row_dict.get(h, "") for h in headers]
+            self._ws.append_row(row, value_input_option="RAW")
+            return SubRow(
+                telegram_user_id=uid, status=status, plan=plan, trial_expires=trial_expires,
+                birth_date="", created_at=now, last_seen_at=now,
+                username=user.username or "", first_name=user.first_name or "", last_name=user.last_name or "",
+                registered_on=today_iso(), last_full_ym="",
+            )
+        return await asyncio.to_thread(_append)
+
+    async def set_birth(self, telegram_user_id: int, birth: date) -> None:
+        self._require()
+        idx = await self.find_row_idx(telegram_user_id)
+        if not idx:
+            return
+
+        def _set() -> None:
+            headers = self._ws.row_values(1)
+            if "birth_date" in headers:
+                col = headers.index("birth_date") + 1
+                self._ws.update_cell(idx, col, birth.isoformat())
+            if "last_seen_at" in headers:
+                col2 = headers.index("last_seen_at") + 1
+                self._ws.update_cell(idx, col2, now_iso())
+        await asyncio.to_thread(_set)
+
+    async def touch_seen(self, telegram_user_id: int) -> None:
+        if not self.enabled:
+            return
+        try:
+            idx = await self.find_row_idx(telegram_user_id)
+            if not idx:
+                return
+            def _touch() -> None:
+                headers = self._ws.row_values(1)
+                if "last_seen_at" in headers:
+                    col = headers.index("last_seen_at") + 1
+                    self._ws.update_cell(idx, col, now_iso())
+            await asyncio.to_thread(_touch)
+        except Exception:
+            return
+
+    async def list_users(self) -> List[SubRow]:
+        self._require()
+        def _all() -> List[SubRow]:
+            rows = self._ws.get_all_records()
+            out: List[SubRow] = []
+            for r in rows:
+                out.append(SubRow(
+                    telegram_user_id=safe_int(r.get("telegram_user_id", 0)),
+                    status=str(r.get("status","") or ""),
+                    plan=str(r.get("plan","") or ""),
+                    trial_expires=str(r.get("trial_expires","") or ""),
+                    birth_date=str(r.get("birth_date","") or ""),
+                    created_at=str(r.get("created_at","") or ""),
+                    last_seen_at=str(r.get("last_seen_at","") or ""),
+                    username=str(r.get("username","") or ""),
+                    first_name=str(r.get("first_name","") or ""),
+                    last_name=str(r.get("last_name","") or ""),
+                    registered_on=str(r.get("registered_on","") or ""),
+                    last_full_ym=str(r.get("last_full_ym","") or ""),
+                ))
+            return out
+        return await asyncio.to_thread(_all)
+
+SHEETS = SheetStore()
 
 
-# ----------------------------
-# Message format
-# ----------------------------
-def make_forecast_message(today: date, bd: date, full: bool) -> str:
+# =========================
+# Message builder
+# =========================
+
+def build_today_text(today: date, birth: Optional[date], full_access: bool, access_kind: str, first_full_day: bool) -> str:
     od = calc_general_day(today)
-    py = calc_personal_year(bd, today)
-    pm = calc_personal_month(py, today)
-    pd = calc_personal_day(pm, today)
+    special = TEXTS["special_dates"].get(today.day)
 
-    od_text = TEXT_OD.get(od, f"ОД={od}")
-    ld_text = TEXT_LD.get(pd, f"ЛД={pd}")
-    lg_text = TEXT_LG_SHORT.get(py, f"ЛГ={py}")
-    lm_text = TEXT_LM_SHORT.get(pm, f"ЛМ={pm}")
+    ld = lg = lm = None
+    if birth:
+        lg = calc_personal_year(birth, today)
+        lm = calc_personal_month(lg, today)
+        ld = calc_personal_day(lm, today)
 
-    if full:
-        # Полное: ОД и ЛД расширенно, ЛГ и ЛМ кратко (как ты просил)
-        return (
-            f"📅 Дата: {today.strftime('%d.%m.%Y')}\n\n"
-            f"🌐 Общий день: {od}\n{od_text}\n\n"
-            f"🗓 Личный год: {py}\n{lg_text}\n"
-            f"🗓 Личный месяц: {pm}\n{lm_text}\n\n"
-            f"🔢 Личный день: {pd}\n{ld_text}\n"
-        )
+    lines: List[str] = []
+    lines.append(f"📅 Дата: {today.strftime('%d.%m.%Y')}")
+    lines.append("")
+    lines.append(f"🌐 Общий день (ОД): {od}")
+    lines.append(TEXTS["od"].get(od, ""))
 
-    # Короткая версия (после 1-го дня trial)
-    return (
-        f"📅 {today.strftime('%d.%m.%Y')}\n"
-        f"🌐 ОД {od}: {od_text}\n"
-        f"🗓 ЛГ {py}: {lg_text}\n"
-        f"🗓 ЛМ {pm}: {lm_text}\n"
-        f"🔢 ЛД {pd}: {ld_text}\n"
-    )
+    if special:
+        lines.append("")
+        lines.append(special)
+
+    if not birth:
+        lines.append("")
+        lines.append(TEXTS["ui"]["need_birth"])
+        lines.append("")
+        lines.append(TEXTS["ui"]["premium_active"] if access_kind == "premium" else ("🎁 Trial активен." if access_kind == "trial" else TEXTS["ui"]["trial_expired"]))
+        return "\n".join([l for l in lines if str(l).strip()])
+
+    assert ld is not None and lg is not None and lm is not None
+
+    lines.append("")
+    if full_access and first_full_day:
+        lines.append(f"🗓 Личный год (ЛГ): {lg}")
+        lines.append(TEXTS["lg_full"].get(lg) or TEXTS["lg_short"].get(lg, ""))
+        lines.append("")
+        lines.append(f"🗓 Личный месяц (ЛМ): {lm}")
+        lines.append(TEXTS["lm_full"].get(lm) or TEXTS["lm_short"].get(lm, ""))
+        lines.append("")
+        lines.append(f"🔢 Личный день (ЛД): {ld}")
+        lines.append(TEXTS["ld"].get(ld, ""))
+    else:
+        lines.append(f"🗓 Личный год (ЛГ): {lg}. {TEXTS['lg_short'].get(lg, '').strip()}")
+        lines.append(f"🗓 Личный месяц (ЛМ): {lm}. {TEXTS['lm_short'].get(lm, '').strip()}")
+        lines.append("")
+        lines.append(f"🔢 Личный день (ЛД): {ld}")
+        lines.append(TEXTS["ld"].get(ld, ""))
+
+    lines.append("")
+    lines.append(TEXTS["ui"]["premium_active"] if access_kind == "premium" else ("🎁 Trial активен: полный прогноз доступен + ежедневка 09:00." if access_kind == "trial" else TEXTS["ui"]["trial_expired"]))
+    return "\n".join([l for l in lines if str(l).strip()])
 
 
-# ----------------------------
-# Admin notify
-# ----------------------------
-async def notify_admins(app: Application, text: str) -> None:
-    if not ADMIN_IDS:
-        return
-    for aid in ADMIN_IDS:
-        try:
-            await app.bot.send_message(chat_id=aid, text=text)
-        except Exception as e:
-            logger.warning("Failed notify admin %s: %s", aid, e)
-
-
-# ----------------------------
+# =========================
 # Handlers
-# ----------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# =========================
+
+async def ensure_sheets_ready() -> None:
+    if SHEETS.enabled:
+        return
+    try:
+        await SHEETS.init()
+        LOGGER.info("Google Sheets ready")
+    except Exception as e:
+        LOGGER.warning("Google Sheets not ready: %s", e)
+
+async def get_or_register(update: Update) -> Tuple[Optional[SubRow], str, bool]:
+    await ensure_sheets_ready()
     user = update.effective_user
-    if not user:
-        return
-
+    assert user is not None
     uid = user.id
-    now = now_kzt().isoformat(sep=" ", timespec="seconds")
-    today = now_kzt().date()
+    today = date.today()
 
-    # ensure sheet row
-    if store.ready():
-        d = store.get_user(uid)
-        if not d:
-            # new user -> create trial 3 days full-access (functionally)
-            trial_expires = (today + timedelta(days=TRIAL_DAYS - 1)).isoformat()
-            sr = SubRow(
-                telegram_user_id=uid,
-                status="active",
-                plan="trial",
-                trial_expires=trial_expires,
-                birth_date="",
-                created_at=now,
-                last_seen_at=now,
-                username=user.username or "",
-                first_name=user.first_name or "",
-                last_name=user.last_name or "",
-                registered_on=today.isoformat(),
-                last_full_ym="",
-            )
-            store.upsert_user(sr)
-            await notify_admins(
-                context.application,
-                f"🆕 Новый пользователь: {uid} @{user.username or '-'} {user.first_name or ''} {user.last_name or ''}\n"
-                f"plan=trial until {trial_expires}",
-            )
-        else:
-            # update last seen + profile fields
-            sr = SubRow(
-                telegram_user_id=uid,
-                status=d.get("status", "active"),
-                plan=d.get("plan", "trial"),
-                trial_expires=d.get("trial_expires", ""),
-                birth_date=d.get("birth_date", ""),
-                created_at=d.get("created_at", now),
-                last_seen_at=now,
-                username=user.username or d.get("username", "") or "",
-                first_name=user.first_name or d.get("first_name", "") or "",
-                last_name=user.last_name or d.get("last_name", "") or "",
-                registered_on=d.get("registered_on", "") or today.isoformat(),
-                last_full_ym=d.get("last_full_ym", "") or "",
-            )
-            store.upsert_user(sr)
+    if not SHEETS.enabled:
+        return None, "trial", True
 
-    await update.message.reply_text(
-        "Привет! 👋\n\n"
-        "Команды:\n"
-        "/setbd DD.MM.YYYY — задать дату рождения\n"
-        "/today — прогноз на сегодня\n"
-        "/status — статус доступа\n"
-    )
+    sub = await SHEETS.get_row(uid)
+    if not sub:
+        exp = (datetime.now(TZ) + timedelta(days=3)).replace(microsecond=0).isoformat()
+        sub = await SHEETS.upsert_user(update, status="trial", plan="trial", trial_expires=exp)
+        return sub, "trial", True
 
-async def setbd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not user:
+    await SHEETS.touch_seen(uid)
+    full_access, kind = compute_access(sub, today)
+    return sub, kind, full_access
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sub, kind, _ = await get_or_register(update)
+    if sub and kind == "trial" and (sub.registered_on == today_iso()):
+        await update.message.reply_text(TEXTS["ui"]["trial_started"])
+    await update.message.reply_text(TEXTS["ui"]["help"])
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(TEXTS["ui"]["help"])
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sub, kind, _ = await get_or_register(update)
+    if not sub:
+        await update.message.reply_text("Статус: trial (Sheets не подключены).")
         return
-    uid = user.id
+    txt = f"Статус: {kind}\nplan={sub.plan}\ntrial_expires={sub.trial_expires or '-'}\nbirth_date={sub.birth_date or '-'}"
+    await update.message.reply_text(txt)
 
-    if not store.ready():
-        await update.message.reply_text("⚠️ Google Sheets пока недоступен. Попробуй позже.")
+async def cmd_setbirth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sub, _, _ = await get_or_register(update)
+    if not sub:
+        await update.message.reply_text("Sheets недоступны: дата рождения не будет сохранена.")
         return
-
     if not context.args:
-        await update.message.reply_text("Формат: /setbd DD.MM.YYYY (например /setbd 15.03.1995)")
+        await update.message.reply_text(TEXTS["ui"]["need_birth"])
+        return
+    b = parse_birth(context.args[0])
+    if not b:
+        await update.message.reply_text("Неверный формат. Пример: 05.11.1992")
+        return
+    await SHEETS.set_birth(sub.telegram_user_id, b)
+    await update.message.reply_text(TEXTS["ui"]["saved_birth"].format(birth=b.strftime("%d.%m.%Y")))
+
+async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sub, kind, full_access = await get_or_register(update)
+    today = date.today()
+    birth = None
+    first_full_day = False
+
+    if sub and sub.birth_date:
+        birth = iso_to_date(sub.birth_date) or parse_birth(sub.birth_date)
+    if sub:
+        first_full_day = (sub.registered_on == today_iso()) and full_access
+
+    text = build_today_text(today, birth, full_access=full_access, access_kind=kind, first_full_day=first_full_day)
+    await update.message.reply_text(text)
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = (update.message.text or "").strip()
+    b = parse_birth(msg)
+    if b:
+        sub, _, _ = await get_or_register(update)
+        if sub and SHEETS.enabled:
+            await SHEETS.set_birth(sub.telegram_user_id, b)
+            await update.message.reply_text(TEXTS["ui"]["saved_birth"].format(birth=b.strftime("%d.%m.%Y")))
+            await cmd_today(update, context)
+            return
+    await update.message.reply_text("Напиши /today или пришли дату рождения ДД.ММ.ГГГГ")
+
+
+# =========================
+# Daily broadcast
+# =========================
+
+async def daily_broadcast(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await ensure_sheets_ready()
+    if not SHEETS.enabled:
         return
 
-    bd_raw = context.args[0].strip()
-    bd = parse_birth_date(bd_raw)
-    if not bd:
-        await update.message.reply_text("Не понял дату. Формат: DD.MM.YYYY или YYYY-MM-DD")
-        return
+    today = date.today()
+    users = await SHEETS.list_users()
+    bot = context.bot
 
-    d = store.get_user(uid)
-    if not d:
-        await update.message.reply_text("Сначала нажми /start")
-        return
-
-    now = now_kzt().isoformat(sep=" ", timespec="seconds")
-    today = now_kzt().date()
-
-    sr = SubRow(
-        telegram_user_id=uid,
-        status=d.get("status", "active"),
-        plan=d.get("plan", "trial"),
-        trial_expires=d.get("trial_expires", ""),
-        birth_date=bd.isoformat(),
-        created_at=d.get("created_at", now),
-        last_seen_at=now,
-        username=user.username or d.get("username", "") or "",
-        first_name=user.first_name or d.get("first_name", "") or "",
-        last_name=user.last_name or d.get("last_name", "") or "",
-        registered_on=d.get("registered_on", "") or today.isoformat(),
-        last_full_ym=d.get("last_full_ym", "") or "",
-    )
-    store.upsert_user(sr)
-    await update.message.reply_text(f"✅ Дата рождения сохранена: {bd.strftime('%d.%m.%Y')}")
-
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not user:
-        return
-    uid = user.id
-
-    if not store.ready():
-        await update.message.reply_text("⚠️ Google Sheets пока недоступен.")
-        return
-
-    d = store.get_user(uid)
-    if not d:
-        await update.message.reply_text("Сначала нажми /start")
-        return
-
-    today = now_kzt().date()
-    blocked_now, _ = ensure_trial_expired_autoblock(d, today)
-    if blocked_now:
-        store.set_plan(uid, status="blocked", plan=d.get("plan", "trial"), trial_expires=d.get("trial_expires", ""))
-        await update.message.reply_text("⛔️ Доступ ограничен.\nTrial закончился или доступ отключён.\nОбратитесь к администратору.")
-        return
-
-    plan = (d.get("plan") or "").strip()
-    status = (d.get("status") or "").strip()
-    te = (d.get("trial_expires") or "").strip()
-    msg = f"📌 Статус: {status}\n📦 План: {plan}"
-    if plan.lower() == "trial" and te:
-        msg += f"\n⏳ Trial до: {te}"
-    await update.message.reply_text(msg)
-
-async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not user:
-        return
-    uid = user.id
-    today = now_kzt().date()
-
-    if not store.ready():
-        await update.message.reply_text("⚠️ Google Sheets пока недоступен.")
-        return
-
-    d = store.get_user(uid)
-    if not d:
-        await update.message.reply_text("Сначала нажми /start")
-        return
-
-    # auto-block after trial
-    blocked_now, _ = ensure_trial_expired_autoblock(d, today)
-    if blocked_now:
-        store.set_plan(uid, status="blocked", plan=d.get("plan", "trial"), trial_expires=d.get("trial_expires", ""))
-        await update.message.reply_text("⛔️ Доступ ограничен.\nTrial закончился или доступ отключён.\nОбратитесь к администратору.")
-        return
-
-    bd = parse_birth_date(d.get("birth_date", ""))
-    if not bd:
-        await update.message.reply_text("Сначала задай дату рождения: /setbd DD.MM.YYYY")
-        return
-
-    full = should_full_message(d, today)
-    msg = make_forecast_message(today, bd, full=full)
-
-    # отметить, что в этом месяце уже был full (для логики можно расширять)
-    now = now_kzt().isoformat(sep=" ", timespec="seconds")
-    sr = SubRow(
-        telegram_user_id=uid,
-        status=d.get("status", "active"),
-        plan=d.get("plan", "trial"),
-        trial_expires=d.get("trial_expires", ""),
-        birth_date=d.get("birth_date", ""),
-        created_at=d.get("created_at", now),
-        last_seen_at=now,
-        username=user.username or d.get("username", "") or "",
-        first_name=user.first_name or d.get("first_name", "") or "",
-        last_name=user.last_name or d.get("last_name", "") or "",
-        registered_on=d.get("registered_on", "") or today.isoformat(),
-        last_full_ym=ym_key(today) if full else (d.get("last_full_ym", "") or ""),
-    )
-    store.upsert_user(sr)
-
-    # отметки про доступ
-    plan = (d.get("plan") or "").strip().lower()
-    if plan == "premium":
-        msg += "\n⭐️ Premium активен: полный прогноз доступен + ежедневка 09:00."
-    elif plan == "trial":
-        msg += f"\n🧪 Trial активен до {d.get('trial_expires','')}: доступ как Premium (формат текста: 1-й день полный, дальше коротко)."
-
-    await update.message.reply_text(msg)
-
-# ----------------------------
-# Daily broadcast (09:00 KZT)
-# ----------------------------
-async def daily_broadcast(app: Application) -> None:
-    if not store.ready():
-        logger.warning("Daily broadcast skipped: Google Sheets not ready")
-        return
-
-    ids = store.list_active_users_for_daily()
-    if not ids:
-        return
-
-    today = now_kzt().date()
-    sent = 0
-    for uid in ids:
-        d = store.get_user(uid)
-        if not d:
+    for sub in users:
+        if not sub.telegram_user_id:
             continue
-
-        blocked_now, _ = ensure_trial_expired_autoblock(d, today)
-        if blocked_now:
-            store.set_plan(uid, status="blocked", plan=d.get("plan", "trial"), trial_expires=d.get("trial_expires", ""))
+        birth = iso_to_date(sub.birth_date) if sub.birth_date else None
+        full_access, kind = compute_access(sub, today)
+        if not full_access:
             continue
-
-        bd = parse_birth_date(d.get("birth_date", ""))
-        if not bd:
-            continue
-
-        full = should_full_message(d, today)
-        msg = "☀️ Ежедневка 09:00\n\n" + make_forecast_message(today, bd, full=full)
-
+        first_full_day = (sub.registered_on == today_iso())
+        text = build_today_text(today, birth, full_access=True, access_kind=kind, first_full_day=first_full_day)
         try:
-            await app.bot.send_message(chat_id=uid, text=msg)
-            sent += 1
-        except Exception as e:
-            logger.warning("Daily send failed uid=%s: %s", uid, e)
-
-    logger.info("Daily broadcast done. sent=%s", sent)
+            await bot.send_message(chat_id=sub.telegram_user_id, text=text)
+            await asyncio.sleep(0.05)
+        except Exception:
+            continue
 
 
-# ----------------------------
-# Error handler
-# ----------------------------
-async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.exception("Unhandled error: %s", context.error)
+# =========================
+# Run
+# =========================
 
-# ----------------------------
-# Scheduler init (must run inside event loop)
-# ----------------------------
-scheduler = AsyncIOScheduler(timezone=KZT_TZ)
-
-async def post_init(app: Application) -> None:
-    # init Google Sheets
-    try:
-        store.init()
-        logger.info("Google Sheets ready: sheet=%s ws=%s", GSHEET_ID[:6] + "...", SUBS_SHEET_NAME)
-    except Exception as e:
-        logger.warning("Google Sheets not ready: %s", e)
-
-    # schedule daily
-    try:
-        scheduler.remove_all_jobs()
-        scheduler.add_job(
-            lambda: app.create_task(daily_broadcast(app)),
-            trigger=CronTrigger(hour=DAILY_PUSH_HOUR, minute=DAILY_PUSH_MINUTE),
-            id="daily_broadcast",
-            replace_existing=True,
-        )
-        scheduler.start()
-        logger.info("Daily broadcast scheduled at %02d:%02d", DAILY_PUSH_HOUR, DAILY_PUSH_MINUTE)
-    except Exception as e:
-        logger.error("Scheduler failed: %s", e)
-
-# ----------------------------
-# Webhook bootstrap
-# ----------------------------
-def compute_webhook_url() -> str:
-    base = WEBHOOK_BASE_URL
-    if not base and RENDER_EXTERNAL_HOSTNAME:
-        base = f"https://{RENDER_EXTERNAL_HOSTNAME}"
-    base = (base or "").rstrip("/")
-    if not base:
-        raise ValueError("WEBHOOK_BASE_URL is empty and RENDER_EXTERNAL_HOSTNAME is empty. Need external base URL.")
-    return base
+def env(name: str, default: str = "") -> str:
+    return (os.getenv(name) or default).strip()
 
 def main() -> None:
-    if not TOKEN:
-        logger.error("TELEGRAM_TOKEN is empty")
-        sys.exit(1)
+    token = env("TELEGRAM_TOKEN") or env("BOT_TOKEN")
+    if not token:
+        LOGGER.error("TELEGRAM_TOKEN is empty")
+        return
 
-    # webhook path: use token as secret path
-    url_path = TOKEN
+    port = int(env("PORT", "10000"))
+    webhook_url = env("WEBHOOK_URL")  # https://<service>.onrender.com
+    webhook_path = env("WEBHOOK_PATH", "/telegram/webhook/secret123")
 
-    logger.info(
-        "BOOT ENV: TOKEN_set=%s GSHEET_ID_set=%s GOOGLE_SA_JSON_len=%s GOOGLE_SA_JSON_B64_len=%s",
-        bool(TOKEN),
-        bool(GSHEET_ID),
-        len(os.getenv("GOOGLE_SA_JSON", "") or ""),
-        len(os.getenv("GOOGLE_SA_JSON_B64", "") or ""),
-    )
+    if not webhook_path.startswith("/"):
+        webhook_path = "/" + webhook_path
 
-    app = (
-        Application.builder()
-        .token(TOKEN)
-        .post_init(post_init)
-        .build()
-    )
+    application = Application.builder().token(token).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("setbd", setbd))
-    app.add_handler(CommandHandler("today", today_cmd))
-    app.add_handler(CommandHandler("status", status_cmd))
-    app.add_error_handler(on_error)
+    application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("help", cmd_help))
+    application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler("setbirth", cmd_setbirth))
+    application.add_handler(CommandHandler("today", cmd_today))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    webhook_base = compute_webhook_url()
-    webhook_url = f"{webhook_base}/{url_path}"
+    application.job_queue.run_daily(daily_broadcast, time=time(9, 0, tzinfo=TZ), name="daily_broadcast")
+    LOGGER.info("Daily broadcast scheduled at 09:00 Asia/Almaty")
 
-    logger.info("Starting webhook server on 0.0.0.0:%s path=/%s", PORT, url_path)
-    logger.info("Webhook URL will be set to: %s", webhook_url)
-
-    # run_webhook: no polling => no 409 conflicts
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=url_path,
-        webhook_url=webhook_url,
-        drop_pending_updates=True,
-    )
+    if webhook_url:
+        full_webhook_url = webhook_url.rstrip("/") + webhook_path
+        LOGGER.info("Webhook server 0.0.0.0:%s path=%s => %s", port, webhook_path, full_webhook_url)
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=webhook_path.lstrip("/"),
+            webhook_url=full_webhook_url,
+            drop_pending_updates=True,
+        )
+    else:
+        LOGGER.warning("WEBHOOK_URL not set => polling (на Render будет 409).")
+        application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
