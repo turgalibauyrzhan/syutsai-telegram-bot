@@ -2,3 +2,4 @@ python-telegram-bot[webhooks,job-queue]==22.5
 gspread==6.1.2
 google-auth==2.34.0
 pytz==2024.2
+apscheduler==3.11.1
