@@ -25,7 +25,7 @@ from apscheduler.triggers.cron import CronTrigger
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 PUBLIC_URL = os.getenv("PUBLIC_URL")
 GSHEET_ID = os.getenv("GSHEET_ID")
-print("GOOGLE_SA_JSON_B64:", bool(GOOGLE_SA_JSON_B64))
+GOOGLE_SA_JSON_B64 = os.getenv("GOOGLE_SA_JSON_B64")
 
 if not all([TELEGRAM_TOKEN, PUBLIC_URL, GSHEET_ID, GOOGLE_SA_JSON_B64]):
     raise ValueError("Missing env vars")
