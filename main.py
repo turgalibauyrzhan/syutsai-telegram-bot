@@ -27,7 +27,7 @@ PUBLIC_URL = os.getenv("PUBLIC_URL")
 GSHEET_ID = os.getenv("GSHEET_ID")
 GSHEET_ID = os.getenv("GSHEET_ID")
 
-if not all([BOT_TOKEN, PUBLIC_URL, SHEET_ID, GOOGLE_CREDS_JSON]):
+if not all([TELEGRAM_TOKEN, PUBLIC_URL, GSHEET_ID, GOOGLE_SA_JSON_B64]):
     raise ValueError("Missing env vars")
 
 TIMEZONE = "Asia/Almaty"
@@ -40,8 +40,8 @@ logger = logging.getLogger("syucai")
 # ======================================================
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-creds = Credentials.from_service_account_info(
-    json.loads(GOOGLE_CREDS_JSON), scopes=SCOPES
+google_creds = json.loads(
+    base64.b64decode(GOOGLE_SA_JSON_B64).decode("utf-8")
 )
 gc = gspread.authorize(creds)
 sheet = gc.open_by_key(SHEET_ID).worksheet("users")
