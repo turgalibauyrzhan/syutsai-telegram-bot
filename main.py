@@ -160,9 +160,47 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=ReplyKeyboardMarkup([["Сегодня"]], resize_keyboard=True)
     )
 
-application.add_handler(
-    application.handler_class(handle)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
 )
+from telegram import Update
+from flask import Flask, request
+
+# ---------- Telegram handlers ----------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Привет! Пришли дату рождения в формате ДД.ММ.ГГГГ"
+    )
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    # тут у тебя будет логика ЛГ / ЛМ / ЛД / ОД
+    await update.message.reply_text(f"Принял: {text}")
+
+# ---------- Telegram application ----------
+
+application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("today", handle_text))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+# ---------- Flask webhook ----------
+
+app = Flask(__name__)
+
+@app.post("/webhook")
+async def webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return "ok"
+
 
 # ----------------- WEBHOOK -----------------
 @app.route(f"/webhook", methods=["POST"])
