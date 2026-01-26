@@ -40,9 +40,12 @@ logger = logging.getLogger("syucai")
 # GOOGLE SHEETS
 # ======================================================
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-creds = json.loads(
+service_account_info = json.loads(
     base64.b64decode(GOOGLE_SA_JSON_B64).decode("utf-8")
+)
+creds = Credentials.from_service_account_info(
+    service_account_info,
+    scopes=["https://www.googleapis.com/auth/spreadsheets"]
 )
 gc = gspread.authorize(creds)
 sheet = gc.open_by_key(SHEET_ID).worksheet("users")
