@@ -48,7 +48,7 @@ creds = Credentials.from_service_account_info(
     scopes=["https://www.googleapis.com/auth/spreadsheets"]
 )
 gc = gspread.authorize(creds)
-sheet = gc.open_by_key(SHEET_ID).worksheet("users")
+sheet = gc.open_by_key(GSHEET_ID).worksheet("users")
 
 HEADERS = sheet.row_values(1)
 
