@@ -2,7 +2,7 @@ import os
 import json
 import base64
 import logging
-from datetime import datetime, date, timedelta
+from datetime import date, datetime, timedelta
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -19,38 +19,68 @@ from telegram.ext import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# ======================================================
-# CONFIG
-# ======================================================
 
+# =========================
+# ENV
+# =========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 PUBLIC_URL = os.getenv("PUBLIC_URL")
 GSHEET_ID = os.getenv("GSHEET_ID")
 GOOGLE_SA_JSON_B64 = os.getenv("GOOGLE_SA_JSON_B64")
 
+print("BOT_TOKEN:", bool(TELEGRAM_TOKEN))
+print("PUBLIC_URL:", bool(PUBLIC_URL))
+print("GSHEET_ID:", bool(GSHEET_ID))
+print("GOOGLE_SA_JSON_B64:", bool(GOOGLE_SA_JSON_B64))
+
 if not all([TELEGRAM_TOKEN, PUBLIC_URL, GSHEET_ID, GOOGLE_SA_JSON_B64]):
     raise ValueError("Missing env vars")
 
-TIMEZONE = "Asia/Almaty"
 
+TIMEZONE = "Asia/Almaty"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("syucai")
 
-# ======================================================
-# GOOGLE SHEETS
-# ======================================================
 
+# =========================
+# GOOGLE SHEETS
+# =========================
 service_account_info = json.loads(
     base64.b64decode(GOOGLE_SA_JSON_B64).decode("utf-8")
 )
+
 creds = Credentials.from_service_account_info(
     service_account_info,
-    scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    scopes=["https://www.googleapis.com/auth/spreadsheets"],
 )
+
 gc = gspread.authorize(creds)
-sheet = gc.open_by_key(GSHEET_ID).worksheet("users")
+spreadsheet = gc.open_by_key(GSHEET_ID)
+
+# === ВАЖНО: правильное имя листа ===
+SHEET_NAME = "subscriptions"
+
+try:
+    sheet = spreadsheet.worksheet(SHEET_NAME)
+except gspread.exceptions.WorksheetNotFound:
+    sheet = spreadsheet.add_worksheet(title=SHEET_NAME, rows=1000, cols=20)
+    sheet.append_row([
+        "telegram_user_id",
+        "status",
+        "plan",
+        "trial_expires",
+        "birth_date",
+        "created_at",
+        "last_seen_at",
+        "username",
+        "first_name",
+        "last_name",
+        "registered_on",
+        "last_full_ym",
+    ])
 
 HEADERS = sheet.row_values(1)
+
 
 def get_user_row(user_id: int):
     try:
@@ -59,6 +89,7 @@ def get_user_row(user_id: int):
     except gspread.exceptions.CellNotFound:
         return None
 
+
 def get_user(user_id: int):
     row = get_user_row(user_id)
     if not row:
@@ -66,99 +97,90 @@ def get_user(user_id: int):
     values = sheet.row_values(row)
     return dict(zip(HEADERS, values))
 
+
 def save_user(data: dict):
     row = get_user_row(int(data["telegram_user_id"]))
     values = [data.get(h, "") for h in HEADERS]
+
     if row:
         sheet.update(f"A{row}", [values])
     else:
         sheet.append_row(values)
 
-# ======================================================
-# NUMEROLOGY
-# ======================================================
 
+# =========================
+# NUMEROLOGY (БАЗА)
+# =========================
 def reduce_to_9(n: int) -> int:
     while n > 9:
         n = sum(map(int, str(n)))
     return n
 
+
 def calc_lg(birth: date, today: date):
     return reduce_to_9(birth.day + birth.month + today.year)
+
 
 def calc_lm(lg: int, today: date):
     return reduce_to_9(lg + today.month)
 
+
 def calc_ld(lm: int, today: date):
     return reduce_to_9(lm + today.day)
 
-def calc_od(today: date):
-    return reduce_to_9(today.day + today.month + today.year)
 
-# ======================================================
-# TEXT DATA (КРАТКО, ПОЛНЫЕ ТЫ УЖЕ ДАЛ — ЗДЕСЬ ОСНОВА)
-# ======================================================
-
-LG = {i: f"Личный год {i}" for i in range(1, 10)}
-LM = {i: f"Личный месяц {i}" for i in range(1, 10)}
-LD = {i: f"Полное описание личного дня {i}" for i in range(1, 10)}
-
-# ======================================================
+# =========================
 # ACCESS
-# ======================================================
-
+# =========================
 def is_trial_active(user):
-    if user["plan"] != "trial":
-        return False
-    return date.fromisoformat(user["trial_expires"]) >= date.today()
+    return (
+        user["plan"] == "trial"
+        and date.fromisoformat(user["trial_expires"]) >= date.today()
+    )
+
 
 def has_full_access(user):
     return user["plan"] == "premium" or is_trial_active(user)
 
-# ======================================================
-# MESSAGE BUILD
-# ======================================================
 
-def build_message(user, birth: date, full: bool):
+# =========================
+# MESSAGE (заглушка, ты дальше сведёшь формулы)
+# =========================
+def build_message(birth: date):
     today = date.today()
-
     lg = calc_lg(birth, today)
     lm = calc_lm(lg, today)
     ld = calc_ld(lm, today)
 
-    msg = f"📅 {today.strftime('%d.%m.%Y')}\n\n"
+    return (
+        f"📅 Дата: {today.strftime('%d.%m.%Y')}\n\n"
+        f"🧮 ЛГ / ЛМ / ЛД: {lg} / {lm} / {ld}"
+    )
 
-    if full:
-        msg += f"🔹 Личный год\n{LG[lg]}\n\n"
-        msg += f"🔹 Личный месяц\n{LM[lm]}\n\n"
-        msg += f"🔹 Личный день\n{LD[ld]}\n"
-    else:
-        msg += f"🔹 Личный день\n{LD[ld]}\n\n"
-        msg += f"▫️ {LM[lm]}\n"
-        msg += f"▫️ {LG[lg]}\n"
 
-    return msg
-
-# ======================================================
+# =========================
 # HANDLERS
-# ======================================================
-
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Введи дату рождения ДД.ММ.ГГГГ")
+    await update.message.reply_text(
+        "Привет! Пришли дату рождения в формате ДД.ММ.ГГГГ"
+    )
 
-async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
+
     try:
         birth = datetime.strptime(text, "%d.%m.%Y").date()
     except ValueError:
-        await update.message.reply_text("Неверный формат")
+        await update.message.reply_text("Неверный формат даты.")
         return
 
     tg = update.effective_user
     user = get_user(tg.id)
+    today = date.today()
 
     if not user:
-        today = date.today()
         user = {
             "telegram_user_id": tg.id,
             "status": "active",
@@ -175,15 +197,13 @@ async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         save_user(user)
 
-    full = has_full_access(user)
-    msg = build_message(user, birth, full)
-
+    msg = build_message(birth)
     await update.message.reply_text(msg)
 
-# ======================================================
-# DAILY BROADCAST
-# ======================================================
 
+# =========================
+# DAILY BROADCAST
+# =========================
 async def morning_broadcast(app: Application):
     users = sheet.get_all_records()
     today = date.today()
@@ -196,22 +216,25 @@ async def morning_broadcast(app: Application):
             continue
 
         birth = date.fromisoformat(u["birth_date"])
-        msg = build_message(u, birth, full=False)
+        msg = build_message(birth)
 
         try:
-            await app.bot.send_message(chat_id=int(u["telegram_user_id"]), text=msg)
+            await app.bot.send_message(
+                chat_id=int(u["telegram_user_id"]),
+                text=msg,
+            )
         except Exception as e:
             logger.warning(e)
 
-# ======================================================
-# MAIN
-# ======================================================
 
+# =========================
+# MAIN
+# =========================
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(
@@ -226,6 +249,7 @@ def main():
         port=10000,
         webhook_url=f"{PUBLIC_URL}/telegram",
     )
+
 
 if __name__ == "__main__":
     main()
