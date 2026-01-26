@@ -15,21 +15,21 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
 
 # ----------------- CONFIG -----------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("syucai")
-
-BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 PUBLIC_URL = os.getenv("PUBLIC_URL")
 GSHEET_ID = os.getenv("GSHEET_ID")
 GOOGLE_SA_JSON_B64 = os.getenv("GOOGLE_SA_JSON_B64")
 
-print("BOT_TOKEN:", bool(BOT_TOKEN))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") or f"{PUBLIC_URL}/webhook"
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL") or PUBLIC_URL
+
+print("TELEGRAM_TOKEN:", bool(TELEGRAM_TOKEN))
 print("PUBLIC_URL:", bool(PUBLIC_URL))
 print("GSHEET_ID:", bool(GSHEET_ID))
 print("GOOGLE_SA_JSON_B64:", bool(GOOGLE_SA_JSON_B64))
 
-if not all([BOT_TOKEN, PUBLIC_URL, GSHEET_ID, GOOGLE_SA_JSON_B64]):
-    raise ValueError("Missing env vars")
+if not all([TELEGRAM_TOKEN, PUBLIC_URL, GSHEET_ID, GOOGLE_SA_JSON_B64]):
+    raise ValueError("Missing required env vars")
 
 # ----------------- GOOGLE SHEETS -----------------
 sa_info = json.loads(base64.b64decode(GOOGLE_SA_JSON_B64).decode("utf-8"))
