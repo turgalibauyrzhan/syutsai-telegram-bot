@@ -41,7 +41,7 @@ logger = logging.getLogger("syucai")
 # ======================================================
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-google_creds = json.loads(
+creds = json.loads(
     base64.b64decode(GOOGLE_SA_JSON_B64).decode("utf-8")
 )
 gc = gspread.authorize(creds)
