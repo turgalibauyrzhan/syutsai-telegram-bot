@@ -2,7 +2,7 @@ import os
 import json
 import base64
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -15,9 +15,6 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 
 
 # =========================
@@ -57,7 +54,6 @@ creds = Credentials.from_service_account_info(
 gc = gspread.authorize(creds)
 spreadsheet = gc.open_by_key(GSHEET_ID)
 
-# === ВАЖНО: правильное имя листа ===
 SHEET_NAME = "subscriptions"
 
 try:
@@ -109,7 +105,7 @@ def save_user(data: dict):
 
 
 # =========================
-# NUMEROLOGY (БАЗА)
+# NUMEROLOGY (база, ты дальше сведёшь 1-в-1 с Excel)
 # =========================
 def reduce_to_9(n: int) -> int:
     while n > 9:
@@ -129,23 +125,6 @@ def calc_ld(lm: int, today: date):
     return reduce_to_9(lm + today.day)
 
 
-# =========================
-# ACCESS
-# =========================
-def is_trial_active(user):
-    return (
-        user["plan"] == "trial"
-        and date.fromisoformat(user["trial_expires"]) >= date.today()
-    )
-
-
-def has_full_access(user):
-    return user["plan"] == "premium" or is_trial_active(user)
-
-
-# =========================
-# MESSAGE (заглушка, ты дальше сведёшь формулы)
-# =========================
 def build_message(birth: date):
     today = date.today()
     lg = calc_lg(birth, today)
@@ -197,14 +176,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         save_user(user)
 
-    msg = build_message(birth)
-    await update.message.reply_text(msg)
+    await update.message.reply_text(build_message(birth))
 
 
 # =========================
-# DAILY BROADCAST
+# DAILY BROADCAST (через job_queue)
 # =========================
-async def morning_broadcast(app: Application):
+async def morning_broadcast(context: ContextTypes.DEFAULT_TYPE):
     users = sheet.get_all_records()
     today = date.today()
 
@@ -216,12 +194,11 @@ async def morning_broadcast(app: Application):
             continue
 
         birth = date.fromisoformat(u["birth_date"])
-        msg = build_message(birth)
 
         try:
-            await app.bot.send_message(
+            await context.bot.send_message(
                 chat_id=int(u["telegram_user_id"]),
-                text=msg,
+                text=build_message(birth),
             )
         except Exception as e:
             logger.warning(e)
@@ -236,13 +213,12 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    scheduler = AsyncIOScheduler(timezone=TIMEZONE)
-    scheduler.add_job(
+    # ⏰ 09:00 Asia/Almaty
+    app.job_queue.run_daily(
         morning_broadcast,
-        CronTrigger(hour=9, minute=0),
-        args=[app],
+        time=time(hour=9, minute=0),
+        name="daily_morning",
     )
-    scheduler.start()
 
     app.run_webhook(
         listen="0.0.0.0",
