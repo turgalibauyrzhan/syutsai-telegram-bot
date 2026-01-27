@@ -32,11 +32,15 @@ if not all([TELEGRAM_TOKEN, PUBLIC_URL, GSHEET_ID, GOOGLE_SA_JSON_B64]):
     raise ValueError("Missing required env vars")
 
 # ----------------- GOOGLE SHEETS -----------------
-sa_info = json.loads(base64.b64decode(GOOGLE_SA_JSON_B64).decode("utf-8"))
+sa_info = json.loads(
+    base64.b64decode(GOOGLE_SA_JSON_B64).decode("utf-8")
+)
+
 creds = Credentials.from_service_account_info(
     sa_info,
     scopes=["https://www.googleapis.com/auth/spreadsheets"]
 )
+
 gc = gspread.authorize(creds)
 sheet = gc.open_by_key(GSHEET_ID).worksheet("subscriptions")
 
