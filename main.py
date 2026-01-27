@@ -211,9 +211,7 @@ scheduler.add_job(morning_job, "cron", hour=9, minute=0)
 scheduler.start()
 
 # ----------------- MAIN -----------------
-def main():
-    application.bot.set_webhook(f"{PUBLIC_URL}/webhook")
-    app.run(host="0.0.0.0", port=10000)
+
 
 if __name__ == "__main__":
     main()
