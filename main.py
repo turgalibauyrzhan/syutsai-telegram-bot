@@ -17,6 +17,9 @@ from telegram.ext import (
     filters,
 )
 
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
 import gspread
 from google.oauth2.service_account import Credentials
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -205,11 +208,14 @@ app = Flask(__name__)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.json, application.bot)
-    asyncio.get_event_loop().create_task(
-        application.process_update(update)
-    )
-    return "ok"
+    try:
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        loop.create_task(application.process_update(update))
+        return "ok", 200
+    except Exception as e:
+        print("WEBHOOK ERROR:", e)
+        return "error", 500
+
 
 # ----------------- MAIN -----------------
 async def main():
