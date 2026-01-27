@@ -17,17 +17,9 @@ from telegram.ext import (
     filters,
 )
 
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-
 import gspread
 from google.oauth2.service_account import Credentials
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram.ext import CommandHandler, MessageHandler, filters
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот жив 👋")
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(update.message.text)
 
 # ----------------- LOGGING -----------------
 logging.basicConfig(level=logging.INFO)
@@ -69,13 +61,13 @@ LM = {i: f"Полное описание личного месяца {i}" for i 
 LG = {i: f"Полное описание личного года {i}" for i in range(1, 10)}
 OD = {
     1: "День начала и инициативы",
-    2: "День партнерства и баланса",
-    3: "День активности и идей",
-    4: "День порядка и дисциплины",
+    2: "День партнерства",
+    3: "День успеха",
+    4: "День структуры",
     5: "День перемен",
-    6: "День семьи и заботы",
-    7: "День анализа",
-    8: "День денег",
+    6: "День любви",
+    7: "День кризиса",
+    8: "День труда",
     9: "День завершений",
 }
 
@@ -113,41 +105,27 @@ def build_message(user, bd):
     today = datetime.now(TZ).date()
     od, lg, lm, ld = calculate(bd, today)
 
-    is_first = not user["birth_date"]
-    current_ym = today.strftime("%Y-%m")
-    is_first_month = user["last_full_ym"] != current_ym and today.day == 1
+    first = not user["birth_date"]
+    first_month = today.day == 1
 
-    text = f"📅 {today.strftime('%d.%m.%Y')}\n"
+    text = f"📅 {today.strftime('%d.%m.%Y')}\n\n"
 
     if today.day in BAD_DATES:
         text += "⚠️ Неблагоприятная дата\n\n"
 
     text += f"🌐 ОД {od}\n{OD[od]}\n\n"
 
-    if is_first:
-        text += (
-            f"🧮 ЛГ {lg}\n{LG[lg]}\n\n"
-            f"📆 ЛМ {lm}\n{LM[lm]}\n\n"
-            f"📍 ЛД {ld}\n{LD[ld]}"
-        )
-    elif is_first_month:
-        text += (
-            f"🧮 ЛГ {lg}\n{LG[lg]}\n\n"
-            f"📆 ЛМ {lm}\n{LM[lm]}\n\n"
-            f"📍 ЛД {ld}\n{LD[ld]}"
-        )
+    if first:
+        text += f"🧮 ЛГ {lg}\n{LG[lg]}\n\n📆 ЛМ {lm}\n{LM[lm]}\n\n📍 ЛД {ld}\n{LD[ld]}"
+    elif first_month:
+        text += f"🧮 ЛГ {lg}\n{LG[lg]}\n\n📆 ЛМ {lm}\n{LM[lm]}"
     else:
-        text += (
-            f"📍 ЛД {ld}\n{LD[ld]}\n\n"
-            f"Кратко:\nЛМ {lm} · ЛГ {lg}"
-        )
+        text += f"📍 ЛД {ld}\n{LD[ld]}\n\nКратко: ЛМ {lm} · ЛГ {lg}"
 
-    return text, current_ym
+    return text
 
 # ----------------- TELEGRAM -----------------
 application = Application.builder().token(TELEGRAM_TOKEN).build()
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Введите дату рождения: ДД.ММ.ГГГГ")
@@ -157,22 +135,13 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     now = datetime.now(TZ)
 
-    user = get_user(uid)
-    if not user:
-        user = {
-            "telegram_user_id": uid,
-            "status": "trial",
-            "plan": "trial",
-            "trial_expires": (now + timedelta(days=TRIAL_DAYS)).strftime("%Y-%m-%d"),
-            "birth_date": "",
-            "created_at": now.isoformat(),
-            "last_seen_at": now.isoformat(),
-            "username": update.effective_user.username or "",
-            "first_name": update.effective_user.first_name or "",
-            "last_name": update.effective_user.last_name or "",
-            "registered_on": now.strftime("%Y-%m-%d"),
-            "last_full_ym": "",
-        }
+    user = get_user(uid) or {
+        "telegram_user_id": uid,
+        "birth_date": "",
+        "last_full_ym": "",
+        "created_at": now.isoformat(),
+        "last_seen_at": now.isoformat(),
+    }
 
     if "." in text:
         user["birth_date"] = text
@@ -182,9 +151,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     bd = datetime.strptime(user["birth_date"], "%d.%m.%Y").date()
-    msg, ym = build_message(user, bd)
+    msg = build_message(user, bd)
 
-    user["last_full_ym"] = ym
     user["last_seen_at"] = now.isoformat()
     upsert_user(user)
 
@@ -200,12 +168,11 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_t
 scheduler = AsyncIOScheduler(timezone=TZ)
 
 async def morning_job():
-    users = sheet.get_all_records()
-    for u in users:
-        if not u["birth_date"]:
+    for u in sheet.get_all_records():
+        if not u.get("birth_date"):
             continue
         bd = datetime.strptime(u["birth_date"], "%d.%m.%Y").date()
-        msg, _ = build_message(u, bd)
+        msg = build_message(u, bd)
         await application.bot.send_message(u["telegram_user_id"], msg)
 
 scheduler.add_job(morning_job, "cron", hour=9, minute=0)
@@ -215,22 +182,18 @@ app = Flask(__name__)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    try:
-        update = Update.de_json(request.get_json(force=True), application.bot)
-        loop.create_task(application.process_update(update))
-        return "ok", 200
-    except Exception as e:
-        print("WEBHOOK ERROR:", e)
-        return "error", 500
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    asyncio.create_task(application.process_update(update))
+    return "ok", 200
 
-
-# ----------------- MAIN -----------------
-async def main():
+# ----------------- START -----------------
+async def setup():
     await application.initialize()
-    await application.start()   # ← ВАЖНО
+    await application.start()
     await application.bot.set_webhook(f"{PUBLIC_URL}/webhook")
     scheduler.start()
 
+asyncio.get_event_loop().create_task(setup())
+
 if __name__ == "__main__":
-    asyncio.run(main())
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
