@@ -120,7 +120,7 @@ def build_message(user, bd):
 
 # ----------------- TELEGRAM -----------------
 app = Flask(__name__)
-application = Application.builder().token(BOT_TOKEN).build()
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 
 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
