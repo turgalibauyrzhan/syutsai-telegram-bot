@@ -23,6 +23,11 @@ asyncio.set_event_loop(loop)
 import gspread
 from google.oauth2.service_account import Credentials
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from telegram.ext import CommandHandler, MessageHandler, filters
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Бот жив 👋")
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(update.message.text)
 
 # ----------------- LOGGING -----------------
 logging.basicConfig(level=logging.INFO)
@@ -141,6 +146,8 @@ def build_message(user, bd):
 
 # ----------------- TELEGRAM -----------------
 application = Application.builder().token(TELEGRAM_TOKEN).build()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Введите дату рождения: ДД.ММ.ГГГГ")
