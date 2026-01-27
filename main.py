@@ -119,7 +119,6 @@ def build_message(user, bd):
     return text, current_ym
 
 # ----------------- TELEGRAM -----------------
-app = Flask(__name__)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -172,7 +171,6 @@ from telegram.ext import (
     filters,
 )
 from telegram import Update
-from flask import Flask, request
 
 # ---------- Telegram handlers ----------
 
@@ -196,14 +194,6 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_t
 
 # ---------- Flask webhook ----------
 
-app = Flask(__name__)
-
-@app.post("/webhook")
-async def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return "ok"
 
 
 # ----------------- WEBHOOK -----------------
