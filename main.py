@@ -209,9 +209,3 @@ def morning_job():
 scheduler = BackgroundScheduler(timezone=TZ)
 scheduler.add_job(morning_job, "cron", hour=9, minute=0)
 scheduler.start()
-
-# ----------------- MAIN -----------------
-
-
-if __name__ == "__main__":
-    main()
