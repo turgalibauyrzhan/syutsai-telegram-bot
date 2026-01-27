@@ -195,12 +195,6 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_t
 # ---------- Flask webhook ----------
 
 
-@app.post("/webhook")
-async def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return "ok"
 
 # ----------------- SCHEDULER -----------------
 def morning_job():
