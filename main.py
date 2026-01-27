@@ -206,12 +206,15 @@ app = Flask(__name__)
 @app.route("/webhook", methods=["POST"])
 def webhook():
     update = Update.de_json(request.json, application.bot)
-    asyncio.create_task(application.process_update(update))
+    asyncio.get_event_loop().create_task(
+        application.process_update(update)
+    )
     return "ok"
 
 # ----------------- MAIN -----------------
 async def main():
     await application.initialize()
+    await application.start()   # ← ВАЖНО
     await application.bot.set_webhook(f"{PUBLIC_URL}/webhook")
     scheduler.start()
 
