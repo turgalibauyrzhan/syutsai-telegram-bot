@@ -195,12 +195,11 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_t
 # ---------- Flask webhook ----------
 
 
-
-# ----------------- WEBHOOK -----------------
-@app.route(f"/webhook", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put_nowait(update)
+@app.post("/webhook")
+async def webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
     return "ok"
 
 # ----------------- SCHEDULER -----------------
@@ -218,6 +217,9 @@ scheduler.add_job(morning_job, "cron", hour=9, minute=0)
 scheduler.start()
 
 # ----------------- MAIN -----------------
+def main():
+    application.bot.set_webhook(f"{PUBLIC_URL}/webhook")
+    app.run(host="0.0.0.0", port=10000)
 
 if __name__ == "__main__":
     main()
