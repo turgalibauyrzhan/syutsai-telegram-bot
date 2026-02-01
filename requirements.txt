@@ -1,7 +1,4 @@
-python-telegram-bot==22.5
-gspread==6.1.2
-google-auth==2.34.0
-google-auth-oauthlib==1.2.3
-apscheduler==3.11.1
-pytz==2024.2
-flask==3.0.3
+python-telegram-bot[webhooks]==20.8
+gspread
+google-auth
+apscheduler
