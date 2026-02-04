@@ -7,7 +7,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 import gspread
 from google.oauth2.service_account import Credentials
 
-# --- НАСТРОЙКИ ---
+# --- LOGGING & KONFIGURATION ---
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
@@ -17,112 +17,135 @@ GSHEET_ID = os.getenv("GSHEET_ID")
 GOOGLE_SA_JSON_B64 = os.getenv("GOOGLE_SA_JSON_B64")
 ADMIN_CONTACT = "@knaddisyucai"
 
-# --- БАЗА ДАННЫХ ОПИСАНИЙ (Из ваших CSV) ---
-DESC_LG = {
-    "1": {"n": "Начало нового цикла", "t": "Время выбора направления на 9 лет. Самый мощный энергетический поток..."},
-    "2": {"n": "Год дипломатии", "t": "Подвижность в отношениях, не принимайте кардинальных решений..."},
-    "3": {"n": "Год анализа и успеха", "t": "Пробуждается аналитическое мышление, время планирования..."},
-    "7": {"n": "Год трансформации", "t": "Время глубокой внутренней трансформации, отработка кармы..."},
-    "8": {"n": "Год труда и обучения", "t": "Успех через дисциплину. Хорошо для недвижимости..."},
-    "9": {"n": "Год служения и разрушения", "t": "Подведение итогов, освобождение от ненужного..."}
+# --- DATEN AUS DEINEN DATEIEN (STRUKTURIERT) ---
+# Hier habe ich die wichtigsten Beschreibungen aus deinen CSVs zusammengeführt
+SYUTSAI_DATA = {
+    "LG": { # Persönliches Jahr
+        "1": "Начало нового цикла. Время выбора направления на 9 лет. Мощный поток энергии.",
+        "2": "Год построения отношений и дипломатии. Не принимайте кардинальных решений.",
+        "3": "Год анализа и успеха. Пробуждается аналитическое мышление, планируйте шаги.",
+        "7": "Год трансформации и кризиса. Глубокая внутренняя трансформация.",
+        "8": "Год труда и обучения. Успех через дисциплину, хорошо для недвижимости.",
+        "9": "Год служения и завершения. Подведение итогов, освобождение от старого."
+    },
+    "LM": { # Persönlicher Monat
+        "1": "Хороший месяц для начала дел. Лидерство, стратегия и планирование.",
+        "2": "Месяц дипломатии и выстраивания отношений. Пейте больше воды.",
+        "3": "Месяц анализа и успеха. Действуйте через расчет, а не эмоции.",
+        "6": "Месяц любви и успеха. Творчество, удача, инвестиции.",
+        "7": "Месяц кризиса или трансформации. Дисциплина и духовные практики."
+    },
+    "LD": { # Persönlicher Tag
+        "1": "День новых начинаний. Любое дело получит поддержку энергии дня.",
+        "2": "День понимания и дипломатии. Налаживайте старые связи.",
+        "7": "День кризиса или трансформации. Дисциплина тела, йога, молитва.",
+        "8": "День обучения и труда. Финансовый результат через навыки.",
+        "9": "День здоровья и благодарности. Баня, массаж, помощь людям."
+    },
+    "OD": { # Allgemeiner Tag
+        "3": "Благоприятный день через анализ. Подходит для сделок и документов.",
+        "6": "Благоприятный день через любовь. Успех в новых начинаниях.",
+        "bad_dates": "Нежелательно начинать новые проекты. Риск обнуления результатов."
+    }
 }
 
-DESC_LM = {
-    "1": "Стратегия и лидерство. Хорошее время для начала проектов.",
-    "2": "Дипломатия и чувственность. Серьезные решения лучше отложить.",
-    "3": "Анализ и успех. Действовать через расчет, а не эмоции."
-}
-
-DESC_LD = {
-    "1": "День новых начинаний. Поддержка в любых делах.",
-    "2": "День понимания. Налаживайте связи, пейте больше воды.",
-    "7": "День кризиса/трансформации. Дисциплина тела, йога, молитва.",
-    "8": "День труда. Обучайтесь, не берите кредиты.",
-    "9": "День благодарности. Массаж, баня, помощь людям."
-}
-
-# --- ЛОГИКА СЮЦАЙ ---
+# --- HILFSFUNKTIONEN ---
 def reduce9(n):
     while n > 9: n = sum(map(int, str(n)))
     return n
 
-def get_prognoz_data(bd_str, tz_name):
+def calculate_all(bd_str, tz_name="Asia/Almaty"):
     tz = pytz.timezone(tz_name)
     now = datetime.now(tz)
     today = now.date()
     bd = datetime.strptime(bd_str, "%d.%m.%Y").date()
     
-    # Расчеты
     od = reduce9(today.day + today.month + today.year)
     lg = reduce9(bd.day + bd.month + today.year)
     lm = reduce9(lg + today.month)
     ld = reduce9(lm + today.day)
     
-    return {"od": od, "lg": lg, "lm": lm, "ld": ld, "day": today.day, "date_str": today.strftime("%d.%m.%Y"), "ym": today.strftime("%m.%Y")}
+    return {"od": od, "lg": lg, "lm": lm, "ld": ld, "day": today.day, "date": today.strftime("%d.%m.%Y"), "ym": today.strftime("%m.%Y")}
 
-# --- GOOGLE SHEETS ---
-def get_user(uid, updates=None):
+# --- GOOGLE SHEETS LOGIK ---
+def get_user_row(uid, updates=None):
     try:
-        creds = Credentials.from_service_account_info(json.loads(base64.b64decode(GOOGLE_SA_JSON_B64)), 
-                scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        decoded = base64.b64decode(GOOGLE_SA_JSON_B64).decode("utf-8")
+        creds = Credentials.from_service_account_info(json.loads(decoded), scopes=["https://www.googleapis.com/auth/spreadsheets"])
         ws = gspread.authorize(creds).open_by_key(GSHEET_ID).worksheet("subscriptions")
-        rows = ws.get_all_values()
-        uid_str, idx, u_row = str(uid), -1, []
-        for i, row in enumerate(rows[1:], start=2):
-            if row and row[0] == uid_str: idx, u_row = i, row; break
-        if idx == -1:
-            u_row = [uid_str, "active", "trial", (datetime.now()+timedelta(days=3)).strftime("%d.%m.%Y"), "", "", "", "", "", "", "", "", "Asia/Almaty", ""]
-            idx = len(rows)+1
+        
+        data = ws.get_all_values()
+        uid_str = str(uid)
+        idx, row = -1, []
+        for i, r in enumerate(data[1:], start=2):
+            if r and r[0] == uid_str: idx, row = i, r; break
+        
+        if idx == -1: # Neu-Registrierung
+            row = [uid_str, "active", "trial", (datetime.now()+timedelta(days=3)).strftime("%d.%m.%Y"), "", "", "", "", "", "", "", "", "Asia/Almaty", ""]
+            idx = len(data) + 1
+        
         if updates:
-            m = {"status":1, "birth_date":4, "last_ym":11, "timezone":12}
-            for k, v in updates.items(): u_row[m[k]] = v
-            ws.update(f"A{idx}:N{idx}", [u_row])
-        return u_row
-    except: return None
+            m = {"status":1, "trial":3, "birth":4, "last_ym":11, "tz":12}
+            for k, v in updates.items():
+                if k in m: row[m[k]] = v
+            ws.update(f"A{idx}:N{idx}", [row])
+        return row
+    except Exception as e:
+        log.error(f"Sheet Error: {e}")
+        return None
 
-# --- КОМАНДЫ ---
-async def start(u: Update, c):
-    await u.message.reply_text("✨ Введите дату рождения (ДД.ММ.ГГГГ):", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("📅 Мой прогноз на сегодня")]], resize_keyboard=True))
+# --- BOT HANDLER ---
+async def start(update: Update, context):
+    await update.message.reply_text("✨ Добро пожаловать! Введите дату рождения (ДД.ММ.ГГГГ):", 
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("📅 Мой прогноз")]], resize_keyboard=True))
 
-async def handle_msg(u: Update, c):
-    text, uid = u.message.text.strip(), u.effective_user.id
-    user = get_user(uid)
+async def handle_text(update: Update, context):
+    text = update.message.text.strip()
+    uid = update.effective_user.id
+    user = get_user_row(uid)
 
-    if len(text) == 10 and "." in text:
-        get_user(uid, {"birth_date": text})
-        await u.message.reply_text(f"✅ Дата {text} сохранена!")
+    if len(text) == 10 and "." in text: # Datumseingabe
+        get_user_row(uid, {"birth": text})
+        await update.message.reply_text(f"✅ Дата {text} сохранена! Нажмите 'Мой прогноз'.")
         return
 
-    if text == "📅 Мой прогноз на сегодня":
-        if not user[4]: await u.message.reply_text("Введите дату рождения!"); return
+    if text == "📅 Мой прогноз":
+        if not user or not user[4]:
+            await update.message.reply_text("Сначала введите дату рождения!"); return
         
-        # Проверка триала
+        # Trial-Check
         exp = datetime.strptime(user[3], "%d.%m.%Y")
         if user[1] != "paid" and datetime.now() > exp:
-            await u.message.reply_text(f"💳 Доступ закрыт. Пишите {ADMIN_CONTACT}"); return
+            await update.message.reply_text(f"💳 Доступ истек. Напишите {ADMIN_CONTACT}"); return
 
-        res = get_prognoz_data(user[4], user[12] or "Asia/Almaty")
-        is_full = (user[11] != res["ym"])
+        res = calculate_all(user[4], user[12] or "Asia/Almaty")
+        is_full = (user[11] != res["ym"]) # Vollständiger Text am 1. oder bei Registrierung
         
-        msg = f"📅 *Прогноз на {res['date_str']}*\n\n"
-        if res['day'] in [10, 20, 30]: msg += "⚠️ *Неблагоприятная дата:* Не начинайте новых дел!\n\n"
-        if res['od'] in [3, 6]: msg += f"🌟 *Общий день {res['od']}:* День успеха!\n\n"
-        else: msg += f"🌐 *Общий день:* {res['od']}\n\n"
+        msg = f"📅 *Прогноз на {res['date']}*\n\n"
+        
+        # OD & Kritische Tage
+        if res['day'] in [10, 20, 30]:
+            msg += f"⚠️ *{SYUTSAI_DATA['OD']['bad_dates']}*\n\n"
+        elif res['od'] in [3, 6]:
+            msg += f"🌟 *Общий день {res['od']}: {SYUTSAI_DATA['OD'][str(res['od'])]}*\n\n"
+        else:
+            msg += f"🌐 *Общий день:* {res['od']}\n\n"
 
-        lg = DESC_LG.get(str(res['lg']), {"n": "Год", "t": "..."})
-        msg += f"✨ *Личный год {res['lg']}: {lg['n']}*\n"
-        if is_full: msg += f"{lg['t']}\n\n"
+        # LG
+        msg += f"✨ *Личный год {res['lg']}:*\n"
+        msg += f"{SYUTSAI_DATA['LG'].get(str(res['lg']), 'Описание года...')}\n\n" if is_full else "_Энергия года в действии._\n\n"
         
-        lm = DESC_LM.get(str(res['lm']), "...")
+        # LM
         msg += f"🌙 *Личный месяц {res['lm']}:*\n"
-        if is_full: msg += f"{lm}\n\n"
+        msg += f"{SYUTSAI_DATA['LM'].get(str(res['lm']), 'Описание месяца...')}\n\n" if is_full else "_Фокус месяца остается прежним._\n\n"
         
-        msg += f"📍 *Личный день {res['ld']}:*\n{DESC_LD.get(str(res['ld']), '...')}"
+        # LD
+        msg += f"📍 *Личный день {res['ld']}:*\n{SYUTSAI_DATA['LD'].get(str(res['ld']), 'Описание дня...')}"
 
-        if is_full: get_user(uid, {"last_ym": res["ym"]})
-        await u.message.reply_text(msg, parse_mode="Markdown")
+        if is_full: get_user_row(uid, {"last_ym": res["ym"]})
+        await update.message.reply_text(msg, parse_mode="Markdown")
 
-# --- FLASK ---
+# --- SERVER START ---
 app = Flask(__name__)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
