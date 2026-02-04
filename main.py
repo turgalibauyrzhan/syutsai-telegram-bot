@@ -153,9 +153,18 @@ async def post_init(app: Application):
     log.info(f"✅ Вебхук установлен на: {webhook_url}")
 
 if __name__ == "__main__":
+    # Указываем post_init для настройки вебхука при старте
     application.post_init = post_init
+    
+    # Получаем порт, который выдал Render
+    port = int(os.environ.get("PORT", 8080))
+    
+    log.info(f"🚀 Запуск вебхука на порту {port}")
+    
     application.run_webhook(
         listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 8080)),
-        webhook_url=f"{PUBLIC_URL}/webhook"
+        port=port,
+        webhook_url=f"{PUBLIC_URL}/webhook",
+        # Это заставит библиотеку создать сервер, который Render сможет проверить
+        allowed_updates=Update.ALL_TYPES 
     )
