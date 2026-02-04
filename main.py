@@ -178,22 +178,23 @@ async def morning_job():
 scheduler.add_job(morning_job, "cron", hour=9, minute=0)
 
 # ----------------- FLASK -----------------
-app = Flask(__name__)
+# ... (весь ваш код с импортами и функциями до обработки команд)
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    asyncio.create_task(application.process_update(update))
-    return "ok", 200
-
-# ----------------- START -----------------
-async def setup():
-    await application.initialize()
-    await application.start()
-    await application.bot.set_webhook(f"{PUBLIC_URL}/webhook")
+async def post_init(application: Application):
+    """Эта функция запустится СРАЗУ после старта бота"""
+    # Запускаем планировщик
     scheduler.start()
-
-asyncio.get_event_loop().create_task(setup())
+    # Устанавливаем вебхук в Telegram
+    await application.bot.set_webhook(f"{PUBLIC_URL}/webhook")
+    print("✅ Бот инициализирован, планировщик запущен")
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    # Указываем post_init для настройки вебхука при старте
+    application.post_init = post_init
+    
+    # Запускаем встроенный сервер (заменяет Flask)
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 8080)),
+        webhook_url=f"{PUBLIC_URL}/webhook"
+    )
