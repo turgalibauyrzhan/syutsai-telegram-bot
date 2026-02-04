@@ -141,17 +141,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user = update.effective_user
+    
+    # 1. Валидация даты
     try:
-        datetime.strptime(text, "%d.%m.%Y")
-        upsert_user(user.id, {
-            "birth_date": text, "username": user.username or "",
-            "first_name": user.first_name or "", "last_name": user.last_name or ""
-        })
-        await update.message.reply_text(get_prognoz(text), parse_mode="Markdown",
-            reply_markup=ReplyKeyboardMarkup([["Сегодня"]], resize_keyboard=True))
-    except:
-        await update.message.reply_text("❌ Введите дату: ДД.ММ.ГГГГ")
+        # Проверяем сам формат
+        birth_date_dt = datetime.strptime(text, "%d.%m.%Y")
+    except ValueError:
+        # Если это не дата, и не кнопка "Сегодня" — ругаемся
+        if text != "Сегодня":
+            await update.message.reply_text("❌ Неверный формат. Пожалуйста, введите дату как 16.09.1994")
+        return
 
+    # 2. Попытка расчета (делаем первым, чтобы пользователь получил ответ в любом случае)
+    try:
+        prognoz = get_prognoz(text)
+        await update.message.reply_text(
+            prognoz, 
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardMarkup([["Сегодня"]], resize_keyboard=True)
+        )
+    except Exception as e:
+        log.error(f"Ошибка расчета: {e}")
+        await update.message.reply_text("😔 Произошла ошибка при расчете прогноза.")
+        return
+
+    # 3. Фоновая запись в Google Sheets (теперь ошибка здесь не блокирует ответ пользователю)
+    try:
+        # Запускаем в отдельном потоке, чтобы не тормозить бота
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, upsert_user, user.id, {
+            "birth_date": text, 
+            "username": user.username or "",
+            "first_name": user.first_name or "", 
+            "last_name": user.last_name or ""
+        })
+    except Exception as e:
+        log.error(f"Ошибка записи в таблицу: {e}")
+        # Пользователю об этом знать не обязательно, он уже получил прогноз
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
 
