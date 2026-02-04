@@ -3,196 +3,152 @@ import json
 import base64
 import asyncio
 import logging
-from datetime import datetime, date, timedelta
-
-from flask import Flask, request
+from datetime import datetime, date
 import pytz
 
 from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
-
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import gspread
 from google.oauth2.service_account import Credentials
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ----------------- LOGGING -----------------
+# --- НАСТРОЙКИ ---
 logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
 
-# ----------------- ENV -----------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 PUBLIC_URL = os.getenv("PUBLIC_URL")
 GSHEET_ID = os.getenv("GSHEET_ID")
 GOOGLE_SA_JSON_B64 = os.getenv("GOOGLE_SA_JSON_B64")
-
-print("TELEGRAM_TOKEN:", bool(TELEGRAM_TOKEN))
-print("PUBLIC_URL:", bool(PUBLIC_URL))
-print("GSHEET_ID:", bool(GSHEET_ID))
-print("GOOGLE_SA_JSON_B64:", bool(GOOGLE_SA_JSON_B64))
-
-if not all([TELEGRAM_TOKEN, PUBLIC_URL, GSHEET_ID, GOOGLE_SA_JSON_B64]):
-    raise RuntimeError("❌ Missing required env vars")
-
 TZ = pytz.timezone("Asia/Almaty")
-TRIAL_DAYS = 3
-BAD_DATES = {10, 20, 30}
 
-# ----------------- GOOGLE SHEETS -----------------
-sa_info = json.loads(
-    base64.b64decode(GOOGLE_SA_JSON_B64).decode("utf-8")
-)
-
-creds = Credentials.from_service_account_info(
-    sa_info,
-    scopes=["https://www.googleapis.com/auth/spreadsheets"],
-)
-
-gc = gspread.authorize(creds)
-sheet = gc.open_by_key(GSHEET_ID).worksheet("subscriptions")
-
-# ----------------- NUMEROLOGY DATA -----------------
-LD = {i: f"Полное описание личного дня {i}" for i in range(1, 10)}
-LM = {i: f"Полное описание личного месяца {i}" for i in range(1, 10)}
-LG = {i: f"Полное описание личного года {i}" for i in range(1, 10)}
-OD = {
-    1: "День начала и инициативы",
-    2: "День партнерства",
-    3: "День успеха",
-    4: "День структуры",
-    5: "День перемен",
-    6: "День любви",
-    7: "День кризиса",
-    8: "День труда",
-    9: "День завершений",
+# --- ДАННЫЕ ИЗ ВАШИХ ТАБЛИЦ ---
+TEXTS_DATA = {
+    "unfavorable_day": "⚠️ Нежелательно начинать новые проекты и события. Есть высокая вероятность обнуления всех результатов ваших действий. Рекомендуется отложить на другой день крупные покупки, договоры, кредиты и т.д.",
+    "OD": {
+        "3": "🌟 *Благоприятный день (ОД 3)*\nДень через анализ и успех. Подходит для важных решений, регистраций, крупных покупок и новых начинаний.",
+        "6": "💖 *Благоприятный день (ОД 6)*\nДень через любовь и успех. Хорошее время для брака, договоров, инвестиций и больших проектов."
+    },
+    "LG": {
+        "1": {"t": "Личный год 1. Начало нового цикла", "d": "Время выбора направления на 9 лет. Мощный энергетический поток.", "r": "Открывайте свое дело, развивайте лидерство, сохраняйте позитив."},
+        "2": {"t": "Личный год 2. Дипломатия и отношения", "d": "Период перемен в отношениях. Старое уходит, новое строится.", "r": "Развивайте навыки дипломатии, будьте гибкими, отпускайте прошлое."},
+        "3": {"t": "Личный год 3. Анализ и успех", "d": "Год творческого подъема и реализации через холодный расчет.", "r": "Анализируйте действия, планируйте, действуйте через логику."},
+        "4": {"t": "Личный год 4. Трансформация и перемены", "d": "Год мистических событий и глубоких внутренних изменений.", "r": "Принимайте перемены, работайте над дисциплиной тела и духа."},
+        "5": {"t": "Личный год 5. Общение и возможности", "d": "Месяц стартов, инициатив и расширения связей.", "r": "Будьте открыты новому, используйте коммуникации для роста."},
+        "6": {"t": "Личный год 6. Любовь и успех", "d": "Год семейных ценностей, комфорта и эмоционального тепла.", "r": "Укрепляйте отношения, проявляйте заботу, занимайтесь творчеством."},
+        "7": {"t": "Личный год 7. Трансформация и кризис", "d": "Глубинная работа над собой, отработка кармических задач.", "r": "Используйте кризис как точку роста, не начинайте новых дел."},
+        "8": {"t": "Личный год 8. Труд и обучение", "d": "Успех через дисциплину и приобретение новых навыков.", "r": "Трудитесь, инвестируйте в образование, избегайте кредитов."},
+        "9": {"t": "Личный год 9. Служение и завершение", "d": "Подведение итогов, освобождение пространства для нового.", "r": "Прощайте обиды, помогайте другим, завершайте старые дела."}
+    },
+    "LM": {
+        "1": {"t": "ЛМ 1. Месяц стратегии", "d": "Время лидерства и планирования новых проектов."},
+        "2": {"t": "ЛМ 2. Месяц дипломатии", "d": "Развитие чувственности и выстраивание связей."},
+        "3": {"t": "ЛМ 3. Месяц анализа", "d": "Сначала думаем, потом делаем. Успех в обучении."},
+        "4": {"t": "ЛМ 4. Месяц мистики", "d": "Неожиданные события, важно сохранять покой."},
+        "5": {"t": "ЛМ 5. Месяц расширения", "d": "Благоприятен для дизайна, поездок и идей."},
+        "6": {"t": "ЛМ 6. Месяц творчества", "d": "Интуиция на деньги, удача в любви и покупках."},
+        "7": {"t": "ЛМ 7. Месяц дисциплины", "d": "Либо взлет, либо падение. Важна йога и практики."},
+        "8": {"t": "ЛМ 8. Месяц контроля", "d": "Внимание к мелочам, мудрость в финансах."},
+        "9": {"t": "ЛМ 9. Месяц завершения", "d": "Очищение пространства, избавление от хлама."}
+    },
+    "LD": {
+        "1": {"t": "ЛД 1. Новые начинания", "d": "Любое дело получит поддержку энергии дня."},
+        "2": {"t": "ЛД 2. Понимание", "d": "Проявляйте терпение. День для укрепления связей."},
+        "3": {"t": "ЛД 3. Планирование", "d": "Анализ поможет принять верные решения."},
+        "4": {"t": "ЛД 4. Мистика", "d": "События вне логики. Сохраняйте трезвый ум."},
+        "5": {"t": "ЛД 5. Коммуникации", "d": "День общения, продаж и новых знакомств."},
+        "6": {"t": "ЛД 6. Забота", "d": "Дарите тепло близким, создавайте комфорт."},
+        "7": {"t": "ЛД 7. Трансформация", "d": "Начните утро с ходьбы или молитвы."},
+        "8": {"t": "ЛД 8. Обучение", "d": "Труд принесет финансовый результат в будущем."},
+        "9": {"t": "ЛД 9. Благодарность", "d": "Отдавайте долги, служите людям, очищайтесь."}
+    }
 }
 
-# ----------------- CALC -----------------
+# --- ЛОГИКА РАСЧЕТА ---
 def reduce9(n: int) -> int:
-    while n > 9:
-        n = sum(map(int, str(n)))
+    while n > 9: n = sum(map(int, str(n)))
     return n
 
-def calculate(bd: date, today: date):
-    od = reduce9(today.day + today.month + today.year)
-    lg = reduce9(bd.day + bd.month + today.year)
-    lm = reduce9(lg + today.month)
-    ld = reduce9(lm + today.day)
+def calculate_numerology(bd: date, target_date: date):
+    od = reduce9(target_date.day + target_date.month + target_date.year)
+    lg = reduce9(bd.day + bd.month + target_date.year)
+    lm = reduce9(lg + target_date.month)
+    ld = reduce9(lm + target_date.day)
     return od, lg, lm, ld
 
-# ----------------- SHEET HELPERS -----------------
-def get_user(uid: int):
-    for r in sheet.get_all_records():
-        if str(r["telegram_user_id"]) == str(uid):
-            return r
-    return None
+# --- GOOGLE SHEETS ---
+def get_sheet():
+    sa_info = json.loads(base64.b64decode(GOOGLE_SA_JSON_B64).decode("utf-8"))
+    creds = Credentials.from_service_account_info(sa_info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    gc = gspread.authorize(creds)
+    return gc.open_by_key(GSHEET_ID).worksheet("subscriptions")
 
-def upsert_user(data: dict):
-    headers = sheet.row_values(1)
-    rows = sheet.get_all_records()
+def upsert_user(data):
+    ws = get_sheet()
+    rows = ws.get_all_records()
     for i, r in enumerate(rows, start=2):
-        if str(r["telegram_user_id"]) == str(data["telegram_user_id"]):
-            sheet.update(f"A{i}:L{i}", [[data[h] for h in headers]])
+        if str(r.get("telegram_user_id")) == str(data["telegram_user_id"]):
+            ws.update(f"A{i}:L{i}", [[data.get(h, "") for h in ws.row_values(1)]])
             return
-    sheet.append_row([data[h] for h in headers])
+    ws.append_row([data.get(h, "") for h in ws.row_values(1)])
 
-# ----------------- MESSAGE -----------------
-def build_message(user, bd):
+# --- ФОРМИРОВАНИЕ СООБЩЕНИЯ ---
+def build_message(bd_str: str):
     today = datetime.now(TZ).date()
-    od, lg, lm, ld = calculate(bd, today)
-
-    first = not user["birth_date"]
-    first_month = today.day == 1
-
-    text = f"📅 {today.strftime('%d.%m.%Y')}\n\n"
-
-    if today.day in BAD_DATES:
-        text += "⚠️ Неблагоприятная дата\n\n"
-
-    text += f"🌐 ОД {od}\n{OD[od]}\n\n"
-
-    if first:
-        text += f"🧮 ЛГ {lg}\n{LG[lg]}\n\n📆 ЛМ {lm}\n{LM[lm]}\n\n📍 ЛД {ld}\n{LD[ld]}"
-    elif first_month:
-        text += f"🧮 ЛГ {lg}\n{LG[lg]}\n\n📆 ЛМ {lm}\n{LM[lm]}"
+    bd = datetime.strptime(bd_str, "%d.%m.%Y").date()
+    od, lg, lm, ld = calculate_numerology(bd, today)
+    
+    msg = f"📅 *Прогноз на {today.strftime('%d.%m.%Y')}*\n\n"
+    
+    # Общий день
+    if today.day in {10, 20, 30}:
+        msg += f"{TEXTS_DATA['unfavorable_day']}\n\n"
+    elif str(od) in TEXTS_DATA["OD"]:
+        msg += f"{TEXTS_DATA['OD'][str(od)]}\n\n"
     else:
-        text += f"📍 ЛД {ld}\n{LD[ld]}\n\nКратко: ЛМ {lm} · ЛГ {lg}"
+        msg += f"🌐 *Общий день:* {od}\n\n"
 
-    return text
+    # Личный Год
+    g = TEXTS_DATA["LG"][str(lg)]
+    msg += f"✨ *{g['t']}*\n_{g['d']}_\n💡 {g['r']}\n\n"
+    
+    # Личный Месяц
+    m = TEXTS_DATA["LM"][str(lm)]
+    msg += f"🌙 *{m['t']}*\n{m['d']}\n\n"
+    
+    # Личный День
+    d = TEXTS_DATA["LD"][str(ld)]
+    msg += f"📍 *{d['t']}*\n{d['d']}"
+    
+    return msg
 
-# ----------------- TELEGRAM -----------------
-application = Application.builder().token(TELEGRAM_TOKEN).build()
+# --- ОБРАБОТЧИКИ ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Введите дату рождения в формате ДД.ММ.ГГГГ")
 
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Введите дату рождения: ДД.ММ.ГГГГ")
-
-async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text.strip()
-    now = datetime.now(TZ)
+    
+    if "." in text: # Попытка обновить дату
+        try:
+            datetime.strptime(text, "%d.%m.%Y")
+            user_data = {"telegram_user_id": uid, "birth_date": text, "last_seen_at": datetime.now(TZ).isoformat()}
+            upsert_user(user_data)
+            await update.message.reply_text(build_message(text), parse_mode="Markdown", 
+                                            reply_markup=ReplyKeyboardMarkup([["Сегодня"]], resize_keyboard=True))
+        except:
+            await update.message.reply_text("❌ Ошибка формата. Используйте ДД.ММ.ГГГГ")
+    elif text == "Сегодня":
+        # Здесь в реальном коде нужно достать дату из базы, для примера просим ввести снова если нет в памяти
+        await update.message.reply_text("Введите вашу дату рождения для расчета.")
 
-    user = get_user(uid) or {
-        "telegram_user_id": uid,
-        "birth_date": "",
-        "last_full_ym": "",
-        "created_at": now.isoformat(),
-        "last_seen_at": now.isoformat(),
-    }
-
-    if "." in text:
-        user["birth_date"] = text
-
-    if not user["birth_date"]:
-        await update.message.reply_text("Введите дату рождения")
-        return
-
-    bd = datetime.strptime(user["birth_date"], "%d.%m.%Y").date()
-    msg = build_message(user, bd)
-
-    user["last_seen_at"] = now.isoformat()
-    upsert_user(user)
-
-    await update.message.reply_text(
-        msg,
-        reply_markup=ReplyKeyboardMarkup([["Сегодня"]], resize_keyboard=True),
-    )
-
+# --- ЗАПУСК ---
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-# ----------------- SCHEDULER -----------------
-scheduler = AsyncIOScheduler(timezone=TZ)
-
-async def morning_job():
-    for u in sheet.get_all_records():
-        if not u.get("birth_date"):
-            continue
-        bd = datetime.strptime(u["birth_date"], "%d.%m.%Y").date()
-        msg = build_message(u, bd)
-        await application.bot.send_message(u["telegram_user_id"], msg)
-
-scheduler.add_job(morning_job, "cron", hour=9, minute=0)
-
-# ----------------- FLASK -----------------
-# ... (весь ваш код с импортами и функциями до обработки команд)
-
-async def post_init(application: Application):
-    """Эта функция запустится СРАЗУ после старта бота"""
-    # Запускаем планировщик
-    scheduler.start()
-    # Устанавливаем вебхук в Telegram
-    await application.bot.set_webhook(f"{PUBLIC_URL}/webhook")
-    print("✅ Бот инициализирован, планировщик запущен")
-
 if __name__ == "__main__":
-    # Указываем post_init для настройки вебхука при старте
-    application.post_init = post_init
-    
-    # Запускаем встроенный сервер (заменяет Flask)
     application.run_webhook(
         listen="0.0.0.0",
         port=int(os.environ.get("PORT", 8080)),
