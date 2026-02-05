@@ -72,5 +72,33 @@ def sync_user(update, birth=None, last_ym=None):
         now_ts = datetime.now(pytz.timezone("Asia/Almaty")).strftime("%d.%m.%Y %H:%M")
 
         if idx == -1:
-            row = [uid, "active", "trial", (datetime.now()+timedelta(days=3)).strftime("%d.%m.%Y"), 
-                   birth or "", now_ts, now_ts, user.username or "", user
+            # СТРОГО 14 колонок согласно вашей структуре таблицы
+            row = [
+                uid,                                # 1. user_id
+                "active",                           # 2. status
+                "trial",                            # 3. plan
+                (datetime.now() + timedelta(days=3)).strftime("%d.%m.%Y"), # 4. expire_at
+                birth or "",                        # 5. birth_date
+                now_ts,                             # 6. created_at
+                now_ts,                             # 7. last_seen_at
+                user.username or "",                # 8. username
+                user.first_name or "",              # 9. first_name
+                user.last_name or "",               # 10. last_name
+                datetime.now().strftime("%d.%m.%Y"),# 11. last_full_calc_date
+                last_ym or "",                      # 12. last_full_ym
+                "Asia/Almaty",                      # 13. timezone
+                ""                                  # 14. notes
+            ]
+            ws.append_row(row)
+            return row
+        else:
+            idx += 1
+            ws.update_cell(idx, 7, now_ts) # Обновляем время визита
+            if birth: 
+                ws.update_cell(idx, 5, birth)
+            if last_ym: 
+                ws.update_cell(idx, 12, last_ym)
+            return ws.row_values(idx)
+    except Exception as e:
+        log.error(f"GSheet Error: {e}")
+        return None
