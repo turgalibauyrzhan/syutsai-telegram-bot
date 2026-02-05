@@ -153,30 +153,34 @@ async def send_full_forecast(update: Update, user):
         row = user["row"]
         tz = pytz.timezone(user["tz"])
 
-        bd = datetime.strptime(row[4], "%d.%m.%Y")
+        bd_raw = (row[4] or "").strip()
+        bd = datetime.strptime(bd_raw, "%d.%m.%Y")
+
         now = datetime.now(tz)
 
         lg = reduce9(bd.day + bd.month + now.year)
         lm = reduce9(lg + now.month)
         ld = reduce9(lm + now.day)
         od = reduce9(now.day + now.month + now.year)
+        y = DESC_LG.get(str(lg), {})
+        m = DESC_LM.get(str(lm), {})
+        d = DESC_LD.get(str(ld), "Нет данных для дня")
+        msg += f"✨ *Личный год {lg}: {y.get('n','')}*\n{y.get('d','')}\n"
+        msg += f"*Рекомендации:* {y.get('r','')}\n*В минусе:* {y.get('m','')}\n\n"
 
-        msg = f"📅 *Прогноз на {now.strftime('%d.%m.%Y')}*\n\n"
-        msg += f"🌐 *Общий день:* {od}\n\n"
+        msg += f"🌙 *Личный месяц {lm}: {m.get('n','')}*\n{m.get('d','')}\n"
+        msg += f"*В минусе:* {m.get('m','')}\n\n"
 
-        y = DESC_LG[str(lg)]
-        msg += f"✨ *Личный год {lg}: {y['n']}*\n{y['d']}\n*Рекомендации:* {y['r']}\n*В минусе:* {y['m']}\n\n"
+        msg += f"📍 *Личный день {ld}:*\n{d}"
 
-        m = DESC_LM[str(lm)]
-        msg += f"🌙 *Личный месяц {lm}: {m['n']}*\n{m['d']}\n*В минусе:* {m['m']}\n\n"
 
-        msg += f"📍 *Личный день {ld}:*\n{DESC_LD[str(ld)]}"
 
         await update.effective_message.reply_text(msg, parse_mode="Markdown")
 
-    except Exception as e:
-        log.error(f"Forecast error: {e}")
-        await update.effective_message.reply_text("Ошибка генерации прогноза.")
+        except Exception as e:
+            log.exception("Forecast error")  # ← ВАЖНО
+            await update.effective_message.reply_text("Ошибка генерации прогноза.")
+
 
 
 # ================= HANDLERS =================
