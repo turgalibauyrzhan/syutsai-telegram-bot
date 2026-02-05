@@ -129,35 +129,47 @@ async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
         msg += f"📍 *Личный день {ld}:*\n{DESC_LD.get(str(ld), '')}"
         await u.message.reply_text(msg, parse_mode="Markdown")
 
-# --- SERVER ---
+# --- СЕРВЕР И ВЕБХУК ---
 app = Flask(__name__)
+
+# Инициализируем бота глобально
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
 
+# Глобальная переменная для цикла событий
+main_loop = asyncio.get_event_loop()
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    """Обработка входящих запросов от Telegram"""
     try:
-        loop.run_until_complete(application.process_update(update))
-    finally:
-        loop.close()
+        update_data = request.get_json(force=True)
+        update = Update.de_json(update_data, application.bot)
+        
+        # Вместо создания нового цикла, пробрасываем задачу в уже работающий
+        asyncio.run_coroutine_threadsafe(application.process_update(update), main_loop)
+        
+    except Exception as e:
+        log.error(f"Ошибка в вебхуке: {e}")
+        
     return "OK", 200
 
 @app.route("/")
-def index(): return "Бот работает!", 200
+def index():
+    return "Бот активен и работает!", 200
 
 if __name__ == "__main__":
-    # Инициализация бота перед запуском Flask
-    async def init_bot():
+    # 1. Настройка вебхука перед запуском Flask
+    async def setup_webhook():
         await application.initialize()
         await application.bot.set_webhook(f"{PUBLIC_URL}/webhook")
-    
-    init_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(init_loop)
-    init_loop.run_until_complete(init_bot())
-    init_loop.close()
-    
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+        log.info(f"Вебхук установлен на: {PUBLIC_URL}/webhook")
+
+    # Запускаем инициализацию в основном цикле
+    main_loop.run_until_complete(setup_webhook())
+
+    # 2. Запуск Flask сервера
+    # На Render переменная PORT устанавливается автоматически
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
