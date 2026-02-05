@@ -1,6 +1,8 @@
 import os, json, base64, logging, asyncio
 from datetime import datetime, timedelta
 import pytz
+import asyncio
+
 from flask import Flask, request
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -144,18 +146,46 @@ application = Application.builder().token(TELEGRAM_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
 
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(application.process_update(update))
-    loop.close()
+    """Синхронная функция Flask для обработки вебхука"""
+    if request.method == "POST":
+        try:
+            # Получаем данные обновления
+            update_data = request.get_json(force=True)
+            update = Update.de_json(update_data, application.bot)
+            
+            # Создаем НОВЫЙ цикл событий специально для этого запроса
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                # Запускаем обработку обновления и ждем завершения
+                loop.run_until_complete(application.process_update(update))
+            finally:
+                loop.close()
+                
+        except Exception as e:
+            log.error(f"Ошибка в вебхуке: {e}")
+            
     return "OK", 200
 
+# --- БЛОК ЗАПУСКА ---
+
 if __name__ == "__main__":
-    async def setup():
-        await application.initialize(); await application.start()
+    # 1. Инициализируем бота (создаем webhook на стороне Telegram)
+    async def setup_bot():
+        await application.initialize()
+        await application.start()
         await application.bot.set_webhook(f"{PUBLIC_URL}/webhook")
-    asyncio.get_event_loop().run_until_complete(setup())
-    app.run(host="0.0.0.0", port=10000)
+        log.info("Webhook установлен!")
+
+    # Запускаем разовую настройку
+    setup_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(setup_loop)
+    setup_loop.run_until_complete(setup_bot())
+    setup_loop.close()
+
+    # 2. Запускаем Flask
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
