@@ -1,46 +1,76 @@
-# --- WEBHOOK LOGIC ---
-app = Flask(__name__)
+import os, json, base64, logging, asyncio
+from datetime import datetime, timedelta
+import pytz
+from flask import Flask, request
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+import gspread
+from google.oauth2.service_account import Credentials
 
-# Инициализируем приложение бота глобально
-application = Application.builder().token(TELEGRAM_TOKEN).build()
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
+# --- НАСТРОЙКИ ---
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    if request.method == "POST":
-        try:
-            update_data = request.get_json(force=True)
-            update = Update.de_json(update_data, application.bot)
-            
-            # Создаем новый цикл для каждого запроса — это решит проблему "засыпания"
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(application.process_update(update))
-            finally:
-                loop.close()
-                
-        except Exception as e:
-            log.error(f"Ошибка при обработке апдейта: {e}")
-            
-    return "OK", 200
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip('/')
+GSHEET_ID = os.getenv("GSHEET_ID")
+GOOGLE_SA_JSON_B64 = os.getenv("GOOGLE_SA_JSON_B64")
 
-@app.route("/", methods=["GET"])
-def index():
-    return "Бот работает!", 200
+# --- ДАННЫЕ ИЗ ВАШИХ ТАБЛИЦ ---
 
-if __name__ == "__main__":
-    # Разовая инициализация бота перед запуском Flask
-    setup_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(setup_loop)
+DESC_LG = {
+    "1": {"n": "Начало нового цикла", "d": "Время выбора направления на 9 лет. Приходит самый мощный энергопоток.", "r": "Открывай дело, развивай лидерство, бери ответственность.", "m": "Жжение в области сердца, депрессия, пустота."},
+    "2": {"n": "Построение отношений", "d": "Период перемен в отношениях. Не принимай кардинальных решений.", "r": "Учись дипломатии, сохраняй гибкость, отпускай старое.", "m": "Депрессия, болезненные переживания разрывов."},
+    "3": {"n": "Анализ и успех", "d": "Пробуждается аналитическое мышление. Время ведения учета.", "r": "Действуй через расчет, планируй шаги на год вперед.", "m": "Лень, азарт, корысть, стремление к быстрой выгоде."},
+    "4": {"n": "Мистические события", "d": "Год постановки целей через неудовлетворенность.", "r": "Ставь цели, будь креативным, трудись честно.", "m": "Желание мошенничать, риск судебных дел, апатия."},
+    "5": {"n": "Удача и масштабирование", "d": "Год правильных коммуникаций и фортуны.", "r": "Расширяй бизнес, путешествуй, строй связи.", "m": "Борьба за справедливость, экстремизм, непостоянство."},
+    "6": {"n": "Успех и комфорт", "d": "Время любви, инвестиций и пересмотра ценностей.", "r": "Дари любовь, инвестируй, создавай комфорт.", "m": "Мстительность, лень, неразборчивые связи."},
+    "7": {"n": "Трансформация и кризис", "d": "Отработка кармы. Время внутреннего роста.", "r": "Принимай ответственность, больше двигайся, не начинай нового.", "m": "Хаос, непонимание, отчаяние, рассеянность."},
+    "8": {"n": "Труд и обучение", "d": "Успех через дисциплину. Время наработки опыта.", "r": "Учись, трудись, покупай недвижимость. Не бери кредиты.", "m": "Ограничения, усталость, перегрузка или бездействие."},
+    "9": {"n": "Служение и завершение", "d": "Завершение цикла. Подведение итогов.", "r": "Прости обиды, отдай старое, помогай людям.", "m": "Эмоциональные всплески, разрушение без созидания."}
+}
+
+DESC_LM = {
+    "1": "Хороший месяц для начала дел. Важна стратегия и лидерство.",
+    "2": "Месяц дипломатии. Активизируется энергия воспоминаний. Пей воду.",
+    "3": "Месяц анализа. Сначала думай, потом делай. Хорошо для обучения.",
+    "4": "Месяц мистики. Ставь цели, будь креативен и честен.",
+    "5": "Месяц масштабирования. Время для бизнеса и новых связей.",
+    "6": "Месяц любви и успеха. Благоприятно для брака и инвестиций.",
+    "7": "Месяц трансформации. Жизнь в дисциплине. Полезны йога и ходьба.",
+    "8": "Месяц труда. Контролируй финансы, повышай квалификацию.",
+    "9": "Месяц благодарности. Подводи итоги и отпускай лишнее."
+}
+
+DESC_LD = {
+    "1": "День начинаний. Будь смелым, реализуй стратегию.",
+    "2": "День дипломатии. Слушай искренне, налаживай связи.",
+    "3": "День анализа. Планируй, избегай азарта.",
+    "4": "День мистики. Будь честен, ставь цели.",
+    "5": "День масштабирования. Отлично для торговли.",
+    "6": "День творчества. Создавай комфорт, дари заботу.",
+    "7": "День трансформации. Дисциплина тела (ходьба).",
+    "8": "День труда. Получай навыки, не бери кредиты.",
+    "9": "День здоровья. Помогай людям, отдавай долги."
+}
+
+# --- ЛОГИКА ---
+def reduce9(n):
+    while n > 9: n = sum(map(int, str(n)))
+    return n
+
+def sync_user(update, birth=None, last_ym=None):
     try:
-        setup_loop.run_until_complete(application.initialize())
-        setup_loop.run_until_complete(application.bot.set_webhook(f"{PUBLIC_URL}/webhook"))
-        log.info(f"Вебхук успешно установлен на {PUBLIC_URL}/webhook")
-    finally:
-        setup_loop.close()
+        user = update.effective_user
+        uid = str(user.id)
+        creds_json = json.loads(base64.b64decode(GOOGLE_SA_JSON_B64).decode("utf-8"))
+        creds = Credentials.from_service_account_info(creds_json, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        ws = gspread.authorize(creds).open_by_key(GSHEET_ID).worksheet("subscriptions")
+        
+        data = ws.get_all_values()
+        idx = next((i for i, r in enumerate(data) if r[0] == uid), -1)
+        now_ts = datetime.now(pytz.timezone("Asia/Almaty")).strftime("%d.%m.%Y %H:%M")
 
-    # Запуск сервера
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+        if idx == -1:
+            row = [uid, "active", "trial", (datetime.now()+timedelta(days=3)).strftime("%d.%m.%Y"), 
+                   birth or "", now_ts, now_ts, user.username or "", user
