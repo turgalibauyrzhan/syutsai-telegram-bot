@@ -162,25 +162,39 @@ async def send_full_forecast(update: Update, user):
         lm = reduce9(lg + now.month)
         ld = reduce9(lm + now.day)
         od = reduce9(now.day + now.month + now.year)
+
+        msg = f"📅 *Прогноз на {now.strftime('%d.%m.%Y')}*\n\n"
+        msg += f"🌐 *Общий день:* {od}\n\n"
+
         y = DESC_LG.get(str(lg), {})
         m = DESC_LM.get(str(lm), {})
         d = DESC_LD.get(str(ld), "Нет данных для дня")
-        msg += f"✨ *Личный год {lg}: {y.get('n','')}*\n{y.get('d','')}\n"
-        msg += f"*Рекомендации:* {y.get('r','')}\n*В минусе:* {y.get('m','')}\n\n"
 
-        msg += f"🌙 *Личный месяц {lm}: {m.get('n','')}*\n{m.get('d','')}\n"
-        msg += f"*В минусе:* {m.get('m','')}\n\n"
+        msg += (
+            f"✨ *Личный год {lg}: {y.get('n','')}*\n"
+            f"{y.get('d','')}\n"
+            f"*Рекомендации:* {y.get('r','')}\n"
+            f"*В минусе:* {y.get('m','')}\n\n"
+        )
+
+        msg += (
+            f"🌙 *Личный месяц {lm}: {m.get('n','')}*\n"
+            f"{m.get('d','')}\n"
+            f"*В минусе:* {m.get('m','')}\n\n"
+        )
 
         msg += f"📍 *Личный день {ld}:*\n{d}"
 
+        await update.effective_message.reply_text(
+            msg,
+            parse_mode="Markdown"
+        )
 
-
-        await update.effective_message.reply_text(msg, parse_mode="Markdown")
-
-        except Exception as e:
-            log.exception("Forecast error")  # ← ВАЖНО
-            await update.effective_message.reply_text("Ошибка генерации прогноза.")
-
+    except Exception as e:
+        log.exception("Forecast error")
+        await update.effective_message.reply_text(
+            "Ошибка генерации прогноза."
+        )
 
 
 # ================= HANDLERS =================
