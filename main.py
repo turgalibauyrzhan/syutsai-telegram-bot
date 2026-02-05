@@ -1,171 +1,264 @@
-import os, json, base64, logging, asyncio
+import os
+import json
+import base64
+import logging
+import asyncio
+import threading
 from datetime import datetime, timedelta
+
 import pytz
 from flask import Flask, request
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
+
 import gspread
 from google.oauth2.service_account import Credentials
 
-# --- НАСТРОЙКИ ---
+
+# ================= НАСТРОЙКИ =================
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip('/')
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 GSHEET_ID = os.getenv("GSHEET_ID")
 GOOGLE_SA_JSON_B64 = os.getenv("GOOGLE_SA_JSON_B64")
 
-# --- БАЗА ДАННЫХ ТЕКСТОВ (ИНТЕГРИРОВАНО ИЗ CSV) ---
+DEFAULT_TZ = "Asia/Almaty"
+
+
+# ================= ОПИСАНИЯ =================
 DESC_LG = {
-    "1": {"n": "Начало нового цикла", "d": "Время выбора направления на 9 лет. Приходит самый мощный энергетический поток.", "r": "Открывай дело, развивай лидерство, бери ответственность.", "m": "Жжение в сердце, депрессия, пустота."},
-    "2": {"n": "Построение отношений", "d": "Период перемен. Старые связи могут разрушаться — не цепляйся.", "r": "Учись дипломатии, сохраняй гибкость, отпускай старое.", "m": "Болезненные разрывы, депрессия."},
-    "3": {"n": "Анализ и успех", "d": "Пробуждается аналитическое мышление. Время успеха через расчет.", "r": "Действуй через расчет, планируй шаги на год вперед.", "m": "Лень, азарт, корысть."},
-    "4": {"n": "Мистические события", "d": "Год постановки целей через неудовлетворенность.", "r": "Ставь цели, будь креативным, трудись честно.", "m": "Желание мошенничать, риск судебных дел."},
-    "5": {"n": "Удача и масштабирование", "d": "Год коммуникаций и фортуны. Время расширять границы.", "r": "Расширяй бизнес, путешествуй, строй связи.", "m": "Борьба за справедливость, экстремизм."},
-    "6": {"n": "Успех и комфорт", "d": "Время любви, инвестиций и пересмотра ценностей.", "r": "Дари любовь, инвестируй, создавай комфорт.", "m": "Мстительность, лень, долги."},
-    "7": {"n": "Трансформация и кризис", "d": "Отработка кармы. Время глубокого внутреннего роста.", "r": "Принимай ответственность, больше двигайся, не начинай нового.", "m": "Хаос, непонимание, отчаяние."},
-    "8": {"n": "Труд и обучение", "d": "Успех через дисциплину. Время наработки фундамента.", "r": "Учись, трудись, покупай недвижимость. Не бери кредиты.", "m": "Усталость, перегрузка или бездействие."},
-    "9": {"n": "Служение и завершение", "d": "Завершение цикла. Подведение итогов.", "r": "Прости обиды, отдай старое, помогай людям.", "m": "Эмоциональные всплески, разрушение."}
+    "1": {"n": "Начало нового цикла", "d": "Выбор направления на 9 лет.", "r": "Бери ответственность.", "m": "Пустота."},
+    "2": {"n": "Отношения", "d": "Перемены в связях.", "r": "Гибкость.", "m": "Разрывы."},
+    "3": {"n": "Анализ", "d": "Успех через расчёт.", "r": "Планируй.", "m": "Лень."},
+    "4": {"n": "Цели", "d": "Постановка целей.", "r": "Честность.", "m": "Риски."},
+    "5": {"n": "Масштаб", "d": "Коммуникации.", "r": "Расширяйся.", "m": "Экстрим."},
+    "6": {"n": "Комфорт", "d": "Любовь и деньги.", "r": "Инвестируй.", "m": "Долги."},
+    "7": {"n": "Кризис", "d": "Карма.", "r": "Дисциплина.", "m": "Хаос."},
+    "8": {"n": "Труд", "d": "Фундамент.", "r": "Учись.", "m": "Перегруз."},
+    "9": {"n": "Завершение", "d": "Итоги.", "r": "Отпусти.", "m": "Эмоции."},
 }
 
 DESC_LM = {
-    "1": {"n": "Хороший месяц для начала дел", "d": "Важна стратегия и лидерство. Время новых проектов.", "m": "Эгоизм, деспотизм, авантюризм."},
-    "2": {"n": "Месяц дипломатии", "d": "Активизируется энергия воспоминаний. Пей больше воды.", "m": "Медлительность, сомнения, депрессия."},
-    "3": {"n": "Месяц анализа и успеха", "d": "Сначала думай, потом делай. Хорошо для обучения.", "m": "Корысть, лень, азарт."},
-    "4": {"n": "Месяц мистических событий", "d": "Ставь цели, будь креативен и честен.", "m": "Обидчивость, паника, потеря логики."},
-    "5": {"n": "Месяц масштабирования", "d": "Время для бизнеса, поездок и новых связей.", "m": "Непостоянство, экстремизм."},
-    "6": {"n": "Месяц любви и успеха", "d": "Интуиция на деньги. Удачно для инвестиций.", "m": "Излишества, мстительность."},
-    "7": {"n": "Месяц трансформации", "d": "Жизнь в дисциплине. Полезны йога и практики.", "m": "Хаос, психологические срывы."},
-    "8": {"n": "Месяц труда и обучения", "d": "Контролируй финансы, повышай квалификацию.", "m": "Чрезмерный контроль, недоверие."},
-    "9": {"n": "Месяц благодарности", "d": "Подводи итоги и отпускай лишнее.", "m": "Воинственность, эмоции."}
+    "1": {"n": "Начало", "d": "Новые проекты.", "m": "Эго."},
+    "2": {"n": "Дипломатия", "d": "Спокойствие.", "m": "Сомнения."},
+    "3": {"n": "Анализ", "d": "Обучение.", "m": "Лень."},
+    "4": {"n": "Мистика", "d": "Цели.", "m": "Паника."},
+    "5": {"n": "Рост", "d": "Бизнес.", "m": "Хаос."},
+    "6": {"n": "Любовь", "d": "Интуиция.", "m": "Излишества."},
+    "7": {"n": "Трансформация", "d": "Практики.", "m": "Срывы."},
+    "8": {"n": "Работа", "d": "Контроль.", "m": "Жёсткость."},
+    "9": {"n": "Благодарность", "d": "Завершение.", "m": "Воинственность."},
 }
 
 DESC_LD = {
-    "1": "День новых начинаний. Реализуй стратегию, будь смелым.",
-    "2": "День дипломатии. Слушай искренне, налаживай связи.",
-    "3": "День анализа и планирования. Избегай азарта.",
-    "4": "День мистических событий. Будь честен, ставь цели.",
-    "5": "День масштабирования. Отлично для торговли и связей.",
-    "6": "День творчества и любви. Создавай комфорт для других.",
-    "7": "День трансформации. Дисциплина тела (ходьба).",
-    "8": "День обучения и труда. Получай навыки, не бери кредиты.",
-    "9": "День здоровья и благодарности. Помогай людям, отдавай долги."
+    "1": "Новые начинания.",
+    "2": "Дипломатия.",
+    "3": "Планирование.",
+    "4": "Честность.",
+    "5": "Сделки.",
+    "6": "Творчество.",
+    "7": "Дисциплина.",
+    "8": "Обучение.",
+    "9": "Здоровье.",
 }
 
-# --- ЛОГИКА ---
-def reduce9(n):
-    while n > 9: n = sum(map(int, str(n)))
+
+# ================= УТИЛИТЫ =================
+def reduce9(n: int) -> int:
+    while n > 9:
+        n = sum(map(int, str(n)))
     return n
 
-def sync_user(update, birth=None, last_ym=None):
-    try:
-        user = update.effective_user
-        uid = str(user.id)
-        creds_json = json.loads(base64.b64decode(GOOGLE_SA_JSON_B64).decode("utf-8"))
-        creds = Credentials.from_service_account_info(creds_json, scopes=["https://www.googleapis.com/auth/spreadsheets"])
-        ws = gspread.authorize(creds).open_by_key(GSHEET_ID).worksheet("subscriptions")
-        
-        data = ws.get_all_values()
-        idx = next((i for i, r in enumerate(data) if r[0] == uid), -1)
-        now_ts = datetime.now(pytz.timezone("Asia/Almaty")).strftime("%d.%m.%Y %H:%M")
 
-        if idx == -1:
-            row = [
-                uid, "active", "trial", (datetime.now() + timedelta(days=3)).strftime("%d.%m.%Y"),
-                birth or "", now_ts, now_ts, user.username or "", user.first_name or "",
-                user.last_name or "", datetime.now().strftime("%d.%m.%Y"), last_ym or "", "Asia/Almaty", ""
-            ]
-            ws.append_row(row)
-            return row
-        else:
-            idx += 1
-            ws.update_cell(idx, 7, now_ts)
-            if birth: ws.update_cell(idx, 5, birth)
-            if last_ym: ws.update_cell(idx, 12, last_ym)
-            return ws.row_values(idx)
+def validate_date(text: str):
+    try:
+        return datetime.strptime(text, "%d.%m.%Y")
+    except ValueError:
+        return None
+
+
+def get_ws():
+    creds_json = json.loads(base64.b64decode(GOOGLE_SA_JSON_B64).decode("utf-8"))
+    creds = Credentials.from_service_account_info(
+        creds_json,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    return gspread.authorize(creds).open_by_key(GSHEET_ID).worksheet("subscriptions")
+
+
+# ================= БАЗА =================
+def sync_user(update: Update, birth=None, tz=None):
+    try:
+        ws = get_ws()
+        uid = str(update.effective_user.id)
+        rows = ws.get_all_values()
+
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+        for i, r in enumerate(rows, start=1):
+            if r and r[0] == uid:
+                if birth:
+                    ws.update_cell(i, 5, birth)
+                if tz:
+                    ws.update_cell(i, 13, tz)
+                ws.update_cell(i, 7, now)
+
+                trial_until = r[3]
+                if trial_until:
+                    if datetime.strptime(trial_until, "%d.%m.%Y") < datetime.now():
+                        return {"expired": True}
+
+                r_dict = r + [""] * (13 - len(r))
+                return {
+                    "row": r_dict,
+                    "tz": r_dict[12] or DEFAULT_TZ,
+                }
+
+        # новый пользователь
+        trial_until = (datetime.now() + timedelta(days=3)).strftime("%d.%m.%Y")
+        row = [
+            uid, "active", "trial", trial_until,
+            birth or "", now, now,
+            update.effective_user.username or "",
+            update.effective_user.first_name or "",
+            update.effective_user.last_name or "",
+            datetime.now().strftime("%d.%m.%Y"),
+            "",
+            tz or DEFAULT_TZ,
+        ]
+        ws.append_row(row)
+        return {"row": row, "tz": row[12]}
+
     except Exception as e:
-        log.error(f"GSheet Error: {e}"); return None
+        log.error(f"GSheet error: {e}")
+        return {"error": True}
 
-# --- ГЕНЕРАЦИЯ ПРОГНОЗА ---
-async def send_full_forecast(u: Update, user_row):
+
+# ================= ПРОГНОЗ =================
+async def send_full_forecast(update: Update, user):
     try:
-        bd_str = user_row[4]
-        bd = datetime.strptime(bd_str, "%d.%m.%Y")
-        now = datetime.now(pytz.timezone("Asia/Almaty"))
-        
+        row = user["row"]
+        tz = pytz.timezone(user["tz"])
+
+        bd = datetime.strptime(row[4], "%d.%m.%Y")
+        now = datetime.now(tz)
+
         lg = reduce9(bd.day + bd.month + now.year)
         lm = reduce9(lg + now.month)
         ld = reduce9(lm + now.day)
         od = reduce9(now.day + now.month + now.year)
-        
-        msg = f"📅 *Прогноз на {now.strftime('%d.%m.%Y')}*\n\n"
-        
-        # Общий день
-        if now.day in [10, 20, 30]:
-            msg += "⚠️ *Неблагоприятная дата (10, 20, 30):* Риск обнуления результатов. Не начинайте новое.\n\n"
-        elif od in [3, 6]:
-            msg += f"🌟 *Общий день {od}:* Очень благоприятный день для сделок и начинаний!\n\n"
-        else:
-            msg += f"🌐 *Общий день:* {od}\n\n"
 
-        # Год и Месяц
-        i_lg = DESC_LG.get(str(lg), {})
-        msg += f"✨ *Личный год {lg}: {i_lg.get('n','')}*\n{i_lg.get('d','')}\n"
-        msg += f"*Рекомендации:* {i_lg.get('r','')}\n*В минусе:* {i_lg.get('m','')}\n\n"
-        
-        i_lm = DESC_LM.get(str(lm), {})
-        msg += f"🌙 *Личный месяц {lm}: {i_lm.get('n','')}*\n{i_lm.get('d','')}\n*В минусе:* {i_lm.get('m','')}\n\n"
-        
-        # День
-        msg += f"📍 *Личный день {ld}:*\n{DESC_LD.get(str(ld), '')}"
-        
-        await u.message.reply_text(msg, parse_mode="Markdown")
+        msg = f"📅 *Прогноз на {now.strftime('%d.%m.%Y')}*\n\n"
+        msg += f"🌐 *Общий день:* {od}\n\n"
+
+        y = DESC_LG[str(lg)]
+        msg += f"✨ *Личный год {lg}: {y['n']}*\n{y['d']}\n*Рекомендации:* {y['r']}\n*В минусе:* {y['m']}\n\n"
+
+        m = DESC_LM[str(lm)]
+        msg += f"🌙 *Личный месяц {lm}: {m['n']}*\n{m['d']}\n*В минусе:* {m['m']}\n\n"
+
+        msg += f"📍 *Личный день {ld}:*\n{DESC_LD[str(ld)]}"
+
+        await update.effective_message.reply_text(msg, parse_mode="Markdown")
+
     except Exception as e:
         log.error(f"Forecast error: {e}")
+        await update.effective_message.reply_text("Ошибка генерации прогноза.")
 
-# --- ОБРАБОТЧИКИ ---
-async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    sync_user(u)
-    await u.message.reply_text("✨ Добро пожаловать! Введите дату рождения (ДД.ММ.ГГГГ):",
-        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("📅 Мой прогноз")]], resize_keyboard=True))
 
-async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    text = u.message.text.strip()
-    if len(text) == 10 and text.count(".") == 2:
-        user_data = sync_user(u, birth=text)
-        await u.message.reply_text(f"✅ Дата {text} сохранена! Вот ваш прогноз:")
-        await send_full_forecast(u, user_data)
+# ================= HANDLERS =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🇰🇿 Алматы", callback_data="tz_Asia/Almaty")],
+        [InlineKeyboardButton("🇷🇺 Москва", callback_data="tz_Europe/Moscow")],
+    ])
+    await update.message.reply_text("Выбери часовой пояс:", reply_markup=kb)
+
+
+async def tz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tz = update.callback_query.data.replace("tz_", "")
+    sync_user(update, tz=tz)
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 Мой прогноз", callback_data="forecast")]
+    ])
+    await update.callback_query.message.reply_text(
+        "Часовой пояс сохранён. Введи дату рождения (ДД.ММ.ГГГГ):",
+        reply_markup=kb,
+    )
+
+
+async def forecast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = sync_user(update)
+    if user.get("error"):
+        await update.callback_query.message.reply_text("Ошибка данных.")
+        return
+    if user.get("expired"):
+        await update.callback_query.message.reply_text("⛔ Пробный период закончился.")
+        return
+    if not user["row"][4]:
+        await update.callback_query.message.reply_text("Сначала введи дату рождения.")
         return
 
-    if text == "📅 Мой прогноз":
-        user_data = sync_user(u)
-        if user_data and user_data[4]:
-            await send_full_forecast(u, user_data)
-        else:
-            await u.message.reply_text("Сначала введите дату рождения!")
+    await send_full_forecast(update, user)
 
-# --- СЕРВЕР ---
+
+async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    bd = validate_date(text)
+    if not bd:
+        await update.message.reply_text("Неверная дата. Формат ДД.ММ.ГГГГ")
+        return
+
+    user = sync_user(update, birth=text)
+    if user.get("error"):
+        await update.message.reply_text("Ошибка сохранения данных.")
+        return
+
+    await send_full_forecast(update, user)
+
+
+# ================= SERVER =================
 app = Flask(__name__)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
+
 application.add_handler(CommandHandler("start", start))
+application.add_handler(CallbackQueryHandler(tz_callback, pattern="^tz_"))
+application.add_handler(CallbackQueryHandler(forecast_callback, pattern="^forecast$"))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
 
-main_loop = asyncio.get_event_loop()
+
+loop = asyncio.new_event_loop()
+threading.Thread(target=lambda: loop.run_forever(), daemon=True).start()
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    try:
-        update = Update.de_json(request.get_json(force=True), application.bot)
-        asyncio.run_coroutine_threadsafe(application.process_update(update), main_loop)
-    except Exception as e:
-        log.error(f"Webhook error: {e}")
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
     return "OK", 200
 
+
 @app.route("/")
-def index(): return "Бот работает!", 200
+def index():
+    return "Bot is running", 200
+
 
 if __name__ == "__main__":
-    main_loop.run_until_complete(application.initialize())
-    main_loop.run_until_complete(application.bot.set_webhook(f"{PUBLIC_URL}/webhook"))
+    asyncio.run(application.initialize())
+    asyncio.run(application.start())
+    asyncio.run(application.bot.set_webhook(f"{PUBLIC_URL}/webhook"))
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
