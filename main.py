@@ -114,18 +114,19 @@ def sync_user(update: Update, birth=None, tz=None):
                     ws.update_cell(i, 5, birth)
                 if tz:
                     ws.update_cell(i, 13, tz)
-                ws.update_cell(i, 7, now)
 
                 trial_until = r[3]
                 if trial_until:
                     if datetime.strptime(trial_until, "%d.%m.%Y") < datetime.now():
                         return {"expired": True}
 
-                r_dict = r + [""] * (13 - len(r))
+                updated_row = ws.row_values(i)
+                updated_row += [""] * (13 - len(updated_row))
+
                 return {
-                    "row": r_dict,
-                    "tz": r_dict[12] or DEFAULT_TZ,
-                }
+                    "row": updated_row,
+                    "tz": updated_row[12] or DEFAULT_TZ,
+}
 
         # новый пользователь
         trial_until = (datetime.now() + timedelta(days=3)).strftime("%d.%m.%Y")
@@ -149,11 +150,17 @@ def sync_user(update: Update, birth=None, tz=None):
 
 # ================= ПРОГНОЗ =================
 async def send_full_forecast(update: Update, user):
+    
     try:
         row = user["row"]
         tz = pytz.timezone(user["tz"])
 
         bd_raw = (row[4] or "").strip()
+        if not bd_raw:
+            await update.effective_message.reply_text(
+                "Дата рождения не сохранена. Введите её ещё раз (ДД.ММ.ГГГГ)."
+            )
+            return
         bd = datetime.strptime(bd_raw, "%d.%m.%Y")
 
         now = datetime.now(tz)
