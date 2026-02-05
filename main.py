@@ -258,7 +258,14 @@ def index():
 
 
 if __name__ == "__main__":
-    asyncio.run(application.initialize())
-    asyncio.run(application.start())
-    asyncio.run(application.bot.set_webhook(f"{PUBLIC_URL}/webhook"))
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    # init telegram
+    loop.call_soon_threadsafe(asyncio.create_task, application.initialize())
+    loop.call_soon_threadsafe(asyncio.create_task, application.bot.set_webhook(
+        f"{PUBLIC_URL}/webhook"
+    ))
+
+    # ВАЖНО: Flask должен стартовать СРАЗУ
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 10000)),
+    )
