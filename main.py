@@ -220,7 +220,7 @@ async def send_full_forecast(u: Update, row):
         msg += f"*В минусе:* {y.get('m','')}\n\n"
         msg += f"🌙 *Личный месяц {lm}: {m.get('n','')}*\n_{m.get('d','')}_\n"
         msg += f"*В минусе:* {m.get('m','')}\n\n"
-        )
+        
         
         await u.message.reply_text(
             msg,
