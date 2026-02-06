@@ -25,6 +25,11 @@ from telegram.ext import (
     filters,
 )
 
+from desc_lg import DESC_LG
+from desc_lm import DESC_LM
+from desc_ld import DESC_LD
+from desc_od import DESC_OD
+
 # ================= НАСТРОЙКИ =================
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -91,6 +96,11 @@ def validate_time(text):
         return True
     except:
         return False
+
+def reduce9(n: int) -> int:
+    while n > 9:
+        n = sum(map(int, str(n)))
+    return n
 
 # ================= GOOGLE SHEETS =================
 _ws = None
@@ -175,6 +185,44 @@ def update_user(update: Update, **fields):
     ws.append_row(row)
     return normalize_row(row)
 
+# ================= ПРОГНОЗ =================
+async def send_full_forecast(u: Update, row):
+    if not row or not row[3]:
+        await u.message.reply_text(
+            "Сначала укажи дату рождения 🙂",
+            reply_markup=main_keyboard()
+        )
+        return
+
+    bd = datetime.strptime(row[3], "%d.%m.%Y")
+    tz = pytz.timezone(row[4] or DEFAULT_TZ)
+    now = datetime.now(tz)
+
+    lg = reduce9(bd.day + bd.month + now.year)
+    lm = reduce9(lg + now.month)
+    ld = reduce9(lm + now.day)
+    od = reduce9(now.day + now.month + now.year)
+
+    msg = f"📅 *ПРОГНОЗ НА {now.strftime('%d.%m.%Y')}*\n\n"
+    msg += f"🌐 *Общий день {od}:*\n{DESC_OD.get(str(od), '')}\n\n"
+    msg += f"📍 *Личный день {ld}:*\n{DESC_LD.get(str(ld), '')}\n\n"
+
+    y = DESC_LG.get(str(lg), {})
+    m = DESC_LM.get(str(lm), {})
+
+    msg += f"✨ *Личный год {lg}: {y.get('n','')}*\n_{y.get('d','')}_\n"
+    msg += f"*Рекомендации:* {y.get('r','')}\n"
+    msg += f"*В минусе:* {y.get('m','')}\n\n"
+
+    msg += f"🌙 *Личный месяц {lm}: {m.get('n','')}*\n_{m.get('d','')}_\n"
+    msg += f"*В минусе:* {m.get('m','')}\n"
+
+    await u.message.reply_text(
+        msg,
+        parse_mode="Markdown",
+        reply_markup=main_keyboard()
+    )
+
 # ================= HANDLERS =================
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     row = get_user(u)
@@ -195,7 +243,6 @@ async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
     row = get_user(u)
 
     if not row:
-        log.warning(f"user {u.effective_user.id} recreated")
         update_user(u, step=WAIT_TZ)
         await u.message.reply_text(
             "Давай начнём сначала 🙂\nВыбери часовой пояс:",
@@ -238,18 +285,18 @@ async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
             await u.message.reply_text("Неверный формат даты.")
         return
 
-
-    if text == "🌍 Изменить часовой пояс":
-        update_user(u, step=CHANGE_TZ)
-        await u.message.reply_text("Выбери часовой пояс:", reply_markup=tz_keyboard())
+    if text == "📅 Мой прогноз":
+        await send_full_forecast(u, row)
         return
 
     if text == "⏰ Изменить время уведомлений":
         update_user(u, step=CHANGE_NOTIFY_TIME)
         await u.message.reply_text("Введите новое время:", reply_markup=time_keyboard())
         return
-    if text == "📅 Мой прогноз":
-        await send_full_forecast(u, row)
+
+    if text == "🌍 Изменить часовой пояс":
+        update_user(u, step=CHANGE_TZ)
+        await u.message.reply_text("Выбери часовой пояс:", reply_markup=tz_keyboard())
         return
 
     if text == "💳 Мой тариф":
@@ -258,47 +305,6 @@ async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
             f"⏳ До: {row[2]}"
         )
         return
-def reduce9(n: int) -> int:
-    while n > 9:
-        n = sum(map(int, str(n)))
-    return n
-
-
-async def send_full_forecast(u: Update, row):
-    if not row or not row[3]:
-        await u.message.reply_text(
-            "Сначала укажи дату рождения 🙂",
-            reply_markup=main_keyboard()
-        )
-        return
-
-    bd = datetime.strptime(row[3], "%d.%m.%Y")
-    tz = pytz.timezone(row[4] or DEFAULT_TZ)
-    now = datetime.now(tz)
-
-    lg = reduce9(bd.day + bd.month + now.year)
-    lm = reduce9(lg + now.month)
-    ld = reduce9(lm + now.day)
-    od = reduce9(now.day + now.month + now.year)
-
-    msg = (
-        msg = f"📅 *ПРОГНОЗ НА {now.strftime('%d.%m.%Y')}*\n\n"
-        msg += f"🌐 *Общий день {od}:*\n{DESC_OD.get(str(od), '')}\n\n"
-        msg += f"📍 *Личный день {ld}:*\n{DESC_LD.get(str(ld), '')}\n\n"
-        y = DESC_LG.get(str(lg), {})
-        m = DESC_LM.get(str(lm), {})
-        msg += f"✨ *Личный год {lg}: {y.get('n','')}*\n_{y.get('d','')}_\n"
-        msg += f"*Рекомендации:* {y.get('r','')}\n"
-        msg += f"*В минусе:* {y.get('m','')}\n\n"
-        msg += f"🌙 *Личный месяц {lm}: {m.get('n','')}*\n_{m.get('d','')}_\n"
-        msg += f"*В минусе:* {m.get('m','')}\n"
-    )
-
-    await u.message.reply_text(
-        msg,
-        parse_mode="Markdown",
-        reply_markup=main_keyboard()
-    )
 
 # ================= SERVER =================
 app = Flask(__name__)
