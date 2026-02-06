@@ -131,11 +131,11 @@ def sync_user(update: Update, **fields):
                 if "birth" in fields:
                     ws.update_cell(i, 5, fields["birth"])
                 if "tz" in fields:
-                    ws.update_cell(i, 13, fields["tz"])
+                    ws.update_cell(i, 12, fields["tz"])
                 if "notify_time" in fields:
-                    ws.update_cell(i, 14, fields["notify_time"])
+                    ws.update_cell(i, 13, fields["notify_time"])
                 if "step" in fields:
-                    ws.update_cell(i, 15, fields["step"])
+                    ws.update_cell(i, 14, fields["step"])
 
                 ws.update_cell(i, 7, now)
 
@@ -190,7 +190,7 @@ def has_access(row) -> bool:
 async def send_full_forecast(u: Update, row):
     if not row:
         await u.message.reply_text("❌ Данные пользователя не найдены.")
-    return
+        return
 
     if not has_access(row):
         await u.message.reply_text(
@@ -198,7 +198,7 @@ async def send_full_forecast(u: Update, row):
             "Для продолжения доступа обратитесь:\n"
             "📞 +7 778 990 01 14"
         )
-    return
+        return
 
     try:
         birth_raw = row[4].strip()
@@ -229,7 +229,7 @@ async def send_full_forecast(u: Update, row):
         await u.message.reply_text(
             msg,
             parse_mode="Markdown",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard()
         )
 
     except Exception:
@@ -364,7 +364,7 @@ def daily_job():
 
             hh, mm = map(int, notify_time.split(":"))
 
-            if now.hour == hh and now.minute == mm:
+            if now.hour == hh and abs(now.minute - mm) <= 1:
                 asyncio.run_coroutine_threadsafe(
                     send_daily_forecast(application, r),
                     loop,
