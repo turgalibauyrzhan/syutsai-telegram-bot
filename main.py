@@ -48,6 +48,8 @@ WAIT_TZ = "WAIT_TZ"
 WAIT_NOTIFY_TIME = "WAIT_NOTIFY_TIME"
 WAIT_BIRTH = "WAIT_BIRTH"
 READY = "READY"
+CHANGE_NOTIFY_TIME = "CHANGE_NOTIFY_TIME"
+
 
 # ====== КОЛОНКИ ======
 COL_UID = 0
@@ -266,15 +268,31 @@ async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     if step == WAIT_NOTIFY_TIME:
         if validate_time(text):
-            update_user(u, notify_time=text, step=WAIT_BIRTH)
+            sync_user(u, notify_time=text, step=WAIT_BIRTH)
             await u.message.reply_text(
                 "Время сохранено.\nВведи дату рождения (ДД.ММ.ГГГГ):",
                 reply_markup=ReplyKeyboardRemove(),
             )
         else:
-            await u.message.reply_text("Формат времени ЧЧ:ММ", reply_markup=time_keyboard())
+            await u.message.reply_text(
+                "Введите время в формате ЧЧ:ММ",
+                reply_markup=time_keyboard(),
+            )
         return
 
+    if step == CHANGE_NOTIFY_TIME:
+        if validate_time(text):
+            sync_user(u, notify_time=text, step=READY)
+            await u.message.reply_text(
+                "✅ Время уведомлений обновлено.",
+                reply_markup=main_menu_keyboard(),
+            )
+        else:
+            await u.message.reply_text(
+                "Введите время в формате ЧЧ:ММ",
+                reply_markup=time_keyboard(),
+            )
+        return
     if step == WAIT_BIRTH:
         if validate_date(text):
             update_user(u, birth=text, step=READY)
@@ -304,10 +322,10 @@ async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
             return
 
         if text == "⏰ Изменить время уведомлений":
-            update_user(u, step=WAIT_NOTIFY_TIME)
+            sync_user(u, step=CHANGE_NOTIFY_TIME)
             await u.message.reply_text(
-            "Выбери новое время уведомлений или введи своё (ЧЧ:ММ):",
-            reply_markup=time_keyboard(),
+                "Выбери новое время уведомлений или введи своё (ЧЧ:ММ):",
+                reply_markup=time_keyboard(),
             )
             return
         if text == "💳 Мой тариф":
