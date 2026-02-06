@@ -5,10 +5,10 @@ import logging
 import asyncio
 import threading
 from datetime import datetime, timedelta
-from descriptions.desc_lg import DESC_LG
-from descriptions.desc_lm import DESC_LM
-from descriptions.desc_ld import DESC_LD
-from descriptions.desc_od import DESC_OD
+from desc_lg import DESC_LG
+from desc_lm import DESC_LM
+from desc_ld import DESC_LD
+from desc_od import DESC_OD
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 
