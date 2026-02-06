@@ -7,8 +7,10 @@ import threading
 from datetime import datetime, timedelta
 
 import pytz
+import gspread
+from google.oauth2.service_account import Credentials
+
 from flask import Flask, request
-from apscheduler.schedulers.background import BackgroundScheduler
 
 from telegram import (
     Update,
@@ -24,14 +26,12 @@ from telegram.ext import (
     filters,
 )
 
-import gspread
-from google.oauth2.service_account import Credentials
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from desc_lg import DESC_LG
 from desc_lm import DESC_LM
 from desc_ld import DESC_LD
 from desc_od import DESC_OD
-
 
 # ================= НАСТРОЙКИ =================
 logging.basicConfig(level=logging.INFO)
@@ -44,22 +44,13 @@ GOOGLE_SA_JSON_B64 = os.getenv("GOOGLE_SA_JSON_B64")
 
 DEFAULT_TZ = "Asia/Almaty"
 
+# FSM
 WAIT_TZ = "WAIT_TZ"
 WAIT_NOTIFY_TIME = "WAIT_NOTIFY_TIME"
 WAIT_BIRTH = "WAIT_BIRTH"
-READY = "READY"
+CHANGE_TZ = "CHANGE_TZ"
 CHANGE_NOTIFY_TIME = "CHANGE_NOTIFY_TIME"
-
-
-# ====== КОЛОНКИ ======
-COL_UID = 0
-COL_STATUS = 1
-COL_TRIAL_UNTIL = 3
-COL_BIRTH = 4
-COL_TZ = 11
-COL_NOTIFY_TIME = 12
-COL_STEP = 13
-
+READY = "READY"
 
 # ================= КЛАВИАТУРЫ =================
 def tz_keyboard():
@@ -69,30 +60,27 @@ def tz_keyboard():
         one_time_keyboard=True,
     )
 
-
 def time_keyboard():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("05:00"), KeyboardButton("06:00")],
-            [KeyboardButton("07:00"), KeyboardButton("08:00")],
+            [KeyboardButton("06:00"), KeyboardButton("09:00")],
+            [KeyboardButton("12:00"), KeyboardButton("18:00")],
+            [KeyboardButton("21:00")],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
-
 def main_keyboard():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("📅 Мой прогноз")],
-            [KeyboardButton("🌍 Изменить часовой пояс")],
             [KeyboardButton("⏰ Изменить время уведомлений")],
+            [KeyboardButton("🌍 Изменить часовой пояс")],
             [KeyboardButton("💳 Мой тариф")],
         ],
         resize_keyboard=True,
     )
-
-
 
 # ================= УТИЛИТЫ =================
 def reduce9(n: int) -> int:
@@ -100,24 +88,18 @@ def reduce9(n: int) -> int:
         n = sum(map(int, str(n)))
     return n
 
-
 def validate_date(text: str):
     try:
-        d = datetime.strptime(text, "%d.%m.%Y")
-        if d > datetime.now():
-            return None
-        return d
-    except ValueError:
+        return datetime.strptime(text, "%d.%m.%Y")
+    except:
         return None
-
 
 def validate_time(text: str) -> bool:
     try:
         datetime.strptime(text, "%H:%M")
         return True
-    except ValueError:
+    except:
         return False
-
 
 # ================= GOOGLE SHEETS =================
 def get_ws():
@@ -126,20 +108,16 @@ def get_ws():
         creds_json,
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
-    return gspread.authorize(creds).open_by_key(GSHEET_ID).worksheet("subscriptions")
-
+    return gspread.authorize(creds).open_by_key(GSHEET_ID).worksheet("users")
 
 def get_user(update: Update):
     ws = get_ws()
     uid = str(update.effective_user.id)
     rows = ws.get_all_values()
-
-    for r in rows:
-        if r and r[COL_UID] == uid:
-            r += [""] * (14 - len(r))
+    for r in rows[1:]:
+        if r and r[0] == uid:
             return r
     return None
-
 
 def update_user(update: Update, **fields):
     ws = get_ws()
@@ -147,216 +125,149 @@ def update_user(update: Update, **fields):
     rows = ws.get_all_values()
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    for i, r in enumerate(rows, start=1):
-        if r and r[COL_UID] == uid:
-            if "birth" in fields:
-                ws.update_cell(i, COL_BIRTH + 1, fields["birth"])
-            if "tz" in fields:
-                ws.update_cell(i, COL_TZ + 1, fields["tz"])
-            if "notify_time" in fields:
-                ws.update_cell(i, COL_NOTIFY_TIME + 1, fields["notify_time"])
-            if "step" in fields:
-                ws.update_cell(i, COL_STEP + 1, fields["step"])
-
-            ws.update_cell(i, 7, now)
-            return
+    for i, r in enumerate(rows[1:], start=2):
+        if r and r[0] == uid:
+            col_map = {
+                "status": 2,
+                "trial_until": 3,
+                "birth_date": 4,
+                "timezone": 5,
+                "notify_time": 6,
+                "step": 7,
+            }
+            for k, v in fields.items():
+                if k in col_map:
+                    ws.update_cell(i, col_map[k], v)
+            ws.update_cell(i, 9, now)
+            return ws.row_values(i)
 
     # новый пользователь
     row = [
         uid,
-        "active",
         "trial",
         (datetime.now() + timedelta(days=3)).strftime("%d.%m.%Y"),
         "",
-        now,
-        now,
-        update.effective_user.username or "",
-        update.effective_user.first_name or "",
-        update.effective_user.last_name or "",
-        datetime.now().strftime("%d.%m.%Y"),
         "",
         "",
         WAIT_TZ,
+        datetime.now().strftime("%d.%m.%Y"),
+        now,
     ]
     ws.append_row(row)
-
+    return row
 
 def has_access(row) -> bool:
-    if row[COL_STATUS].lower() == "premium":
-        return True
-
+    """
+    row[1] -> status (trial / premium)
+    row[2] -> trial_until (ДД.ММ.ГГГГ) — дата окончания ЛЮБОГО тарифа
+    """
     try:
-        trial_until = datetime.strptime(row[COL_TRIAL_UNTIL], "%d.%m.%Y").date()
-        return datetime.now().date() <= trial_until
+        until = datetime.strptime(row[2], "%d.%m.%Y").date()
     except Exception:
         return False
+
+    return datetime.now().date() <= until
 
 
 # ================= ПРОГНОЗ =================
 async def send_full_forecast(u: Update, row):
-    if not row:
-        await u.message.reply_text("❌ Данные пользователя не найдены.")
-        return
-
     if not has_access(row):
         await u.message.reply_text(
             "⛔ Пробный период завершён.\n\n"
-            "Для продолжения доступа:\n📞 +7 778 990 01 14"
+            "Для подключения PREMIUM:\n"
+            "📞 +7 778 990 01 14"
         )
         return
 
-    try:
-        birth = row[COL_BIRTH]
-        tz_name = row[COL_TZ] or DEFAULT_TZ
+    bd = datetime.strptime(row[3], "%d.%m.%Y")
+    tz = pytz.timezone(row[4] or DEFAULT_TZ)
+    now = datetime.now(tz)
 
-        bd = datetime.strptime(birth, "%d.%m.%Y")
-        tz = pytz.timezone(tz_name)
-        now = datetime.now(tz)
+    lg = reduce9(bd.day + bd.month + now.year)
+    lm = reduce9(lg + now.month)
+    ld = reduce9(lm + now.day)
+    od = reduce9(now.day + now.month + now.year)
 
-        lg = reduce9(bd.day + bd.month + now.year)
-        lm = reduce9(lg + now.month)
-        ld = reduce9(lm + now.day)
-        od = reduce9(now.day + now.month + now.year)
+    msg = (
+        f"📅 *ПРОГНОЗ НА {now.strftime('%d.%m.%Y')}*\n\n"
+        f"🌐 *Общий день {od}:*\n{DESC_OD.get(str(od),'')}\n\n"
+        f"📍 *Личный день {ld}:*\n{DESC_LD.get(str(ld),'')}\n\n"
+    )
 
-        msg = f"📅 *ПРОГНОЗ НА {now.strftime('%d.%m.%Y')}*\n\n"
-        msg += f"🌐 *Общий день {od}:*\n{DESC_OD.get(str(od),'')}\n\n"
-        msg += f"📍 *Личный день {ld}:*\n{DESC_LD.get(str(ld),'')}\n\n"
-
-        y = DESC_LG.get(str(lg), {})
-        m = DESC_LM.get(str(lm), {})
-
-        msg += f"✨ *Личный год {lg}: {y.get('n','')}*\n_{y.get('d','')}_\n"
-        msg += f"*Рекомендации:* {y.get('r','')}\n"
-        msg += f"*В минусе:* {y.get('m','')}\n\n"
-
-        msg += f"🌙 *Личный месяц {lm}: {m.get('n','')}*\n_{m.get('d','')}_\n"
-        msg += f"*В минусе:* {m.get('m','')}"
-
-        await u.message.reply_text(
-            msg,
-            parse_mode="Markdown",
-            reply_markup=main_keyboard(),
-        )
-
-    except Exception:
-        log.exception("Forecast error")
-        await u.message.reply_text("Ошибка генерации прогноза.")
-
+    await u.message.reply_text(
+        msg,
+        parse_mode="Markdown",
+        reply_markup=main_keyboard(),
+    )
 
 # ================= HANDLERS =================
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    update_user(u, step=WAIT_TZ)
-    await u.message.reply_text("Выбери часовой пояс:", reply_markup=tz_keyboard())
-
+    row = get_user(u)
+    if not row:
+        update_user(u, step=WAIT_TZ)
+        await u.message.reply_text("Выбери часовой пояс:", reply_markup=tz_keyboard())
+    else:
+        await u.message.reply_text("Главное меню:", reply_markup=main_keyboard())
 
 async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
     text = u.message.text.strip()
     row = get_user(u)
-    step = row[COL_STEP] if row else WAIT_TZ
+    step = row[6]
 
-    if step == WAIT_TZ:
-        if text in ["🇰🇿 Алматы", "🇷🇺 Москва"]:
+    if step in [WAIT_TZ, CHANGE_TZ]:
+        if "Алматы" in text or "Москва" in text:
             tz = "Asia/Almaty" if "Алматы" in text else "Europe/Moscow"
-            update_user(u, tz=tz, step=WAIT_NOTIFY_TIME)
+            next_step = WAIT_NOTIFY_TIME if step == WAIT_TZ else READY
+            update_user(u, timezone=tz, step=next_step)
             await u.message.reply_text(
-                "Выбери время уведомления или введи своё (ЧЧ:ММ):",
+                "Выбери время уведомлений:",
                 reply_markup=time_keyboard(),
             )
         else:
-            await u.message.reply_text("Выбери часовой пояс кнопкой.", reply_markup=tz_keyboard())
+            await u.message.reply_text("Выбери часовой пояс кнопкой.")
         return
 
-    if step == WAIT_NOTIFY_TIME:
+    if step in [WAIT_NOTIFY_TIME, CHANGE_NOTIFY_TIME]:
         if validate_time(text):
-            sync_user(u, notify_time=text, step=WAIT_BIRTH)
-            await u.message.reply_text(
-                "Время сохранено.\nВведи дату рождения (ДД.ММ.ГГГГ):",
-                reply_markup=ReplyKeyboardRemove(),
-            )
+            next_step = WAIT_BIRTH if step == WAIT_NOTIFY_TIME else READY
+            update_user(u, notify_time=text, step=next_step)
+            if step == WAIT_BIRTH:
+                await u.message.reply_text("Введи дату рождения (ДД.ММ.ГГГГ):")
+            else:
+                await u.message.reply_text("Время обновлено.", reply_markup=main_keyboard())
         else:
-            await u.message.reply_text(
-                "Введите время в формате ЧЧ:ММ",
-                reply_markup=time_keyboard(),
-            )
+            await u.message.reply_text("Введите время ЧЧ:ММ")
         return
 
-    if step == CHANGE_NOTIFY_TIME:
-        if validate_time(text):
-            sync_user(u, notify_time=text, step=READY)
-            await u.message.reply_text(
-                "✅ Время уведомлений обновлено.",
-                reply_markup=main_menu_keyboard(),
-            )
-        else:
-            await u.message.reply_text(
-                "Введите время в формате ЧЧ:ММ",
-                reply_markup=time_keyboard(),
-            )
-        return
     if step == WAIT_BIRTH:
         if validate_date(text):
-            update_user(u, birth=text, step=READY)
-            row = get_user(u)
-            await send_full_forecast(u, row)
+            update_user(u, birth_date=text, step=READY)
+            await send_full_forecast(u, get_user(u))
         else:
-            await u.message.reply_text("Дата должна быть в формате ДД.ММ.ГГГГ")
+            await u.message.reply_text("Неверный формат даты.")
         return
 
-    if step == READY:
-        if not has_access(row):
-            await u.message.reply_text(
-            "⛔ Пробный период завершён.\n\n"
-            "Для продолжения доступа:\n📞 +7 778 990 01 14"
-            )
-            return
-        if text == "📅 Мой прогноз":
-            await send_full_forecast(u, row)
-            return
+    if text == "📅 Мой прогноз":
+        await send_full_forecast(u, row)
+        return
 
-        if text == "🌍 Изменить часовой пояс":
-            update_user(u, step=WAIT_TZ)
-            await u.message.reply_text(
-            "Выбери новый часовой пояс:",
-            reply_markup=tz_keyboard(),
-            )
-            return
+    if text == "⏰ Изменить время уведомлений":
+        update_user(u, step=CHANGE_NOTIFY_TIME)
+        await u.message.reply_text("Введите новое время:", reply_markup=time_keyboard())
+        return
 
-        if text == "⏰ Изменить время уведомлений":
-            sync_user(u, step=CHANGE_NOTIFY_TIME)
-            await u.message.reply_text(
-                "Выбери новое время уведомлений или введи своё (ЧЧ:ММ):",
-                reply_markup=time_keyboard(),
-            )
-            return
-        if text == "💳 Мой тариф":
-            status = row[COL_STATUS].lower()
-            trial_until = row[COL_TRIAL_UNTIL]
-            if status == "premium":
-                msg = (
-                    "💳 *Ваш тариф: PREMIUM*\n\n"
-                    "✅ Полный доступ без ограничений\n"
-                    "🔔 Ежедневные уведомления активны"
-                    )
-            else:
-                msg = (
-                    "💳 *Ваш тариф: ПРОБНЫЙ*\n\n"
-                    f"⏳ Действует до: *{trial_until}*\n\n"
-                    "После окончания пробного периода доступ будет ограничен.\n"
-                    "Для подключения PREMIUM:\n"
-                    "📞 +7 778 990 01 14"
-                    )
+    if text == "🌍 Изменить часовой пояс":
+        update_user(u, step=CHANGE_TZ)
+        await u.message.reply_text("Выбери часовой пояс:", reply_markup=tz_keyboard())
+        return
 
-            await u.message.reply_text(
-                msg,
-                parse_mode="Markdown",
-                reply_markup=main_keyboard(),
-                )
-            return
-
-    await u.message.reply_text(
-        "Выберите действие:",
-        reply_markup=main_keyboard(),
+    if text == "💳 Мой тариф":
+        await u.message.reply_text(
+            f"💳 Тариф: {row[1].upper()}\n"
+            f"⏳ До: {row[2]}\n\n"
+            "📞 +7 778 990 01 14"
         )
+        return
 
 # ================= SERVER =================
 app = Flask(__name__)
@@ -366,15 +277,7 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
 
 loop = asyncio.new_event_loop()
-
-
-def run_loop():
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
-
-
-threading.Thread(target=run_loop, daemon=True).start()
-
+threading.Thread(target=lambda: loop.run_forever(), daemon=True).start()
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -382,12 +285,11 @@ def webhook():
     asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
     return "OK", 200
 
-
 if __name__ == "__main__":
     asyncio.run_coroutine_threadsafe(application.initialize(), loop)
     asyncio.run_coroutine_threadsafe(application.start(), loop)
     asyncio.run_coroutine_threadsafe(
-        application.bot.set_webhook(f"{PUBLIC_URL}/webhook"), loop
+        application.bot.set_webhook(f"{PUBLIC_URL}/webhook"),
+        loop,
     )
-
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
