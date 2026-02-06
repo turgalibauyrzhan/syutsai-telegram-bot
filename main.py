@@ -379,9 +379,9 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(daily_job, "interval", minutes=1)
 scheduler.start()
 
-    app.run(
+app.run(
         host="0.0.0.0",
         port=int(os.environ.get("PORT", 10000)),
-    )
+        )
     
     
