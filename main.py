@@ -71,8 +71,8 @@ def tz_keyboard():
 def time_keyboard():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("09:00"), KeyboardButton("12:00")],
-            [KeyboardButton("18:00"), KeyboardButton("21:00")],
+            [KeyboardButton("05:00"), KeyboardButton("06:00")],
+            [KeyboardButton("07:00"), KeyboardButton("08:00")],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
@@ -81,9 +81,15 @@ def time_keyboard():
 
 def main_keyboard():
     return ReplyKeyboardMarkup(
-        [[KeyboardButton("📅 Мой прогноз")]],
+        [
+            [KeyboardButton("📅 Мой прогноз")],
+            [KeyboardButton("🌍 Изменить часовой пояс")],
+            [KeyboardButton("⏰ Изменить время уведомлений")],
+            [KeyboardButton("💳 Мой тариф")],
+        ],
         resize_keyboard=True,
     )
+
 
 
 # ================= УТИЛИТЫ =================
@@ -279,11 +285,60 @@ async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
         return
 
     if step == READY:
+        if not has_access(row):
+            await u.message.reply_text(
+            "⛔ Пробный период завершён.\n\n"
+            "Для продолжения доступа:\n📞 +7 778 990 01 14"
+            )
+            return
         if text == "📅 Мой прогноз":
             await send_full_forecast(u, row)
-        else:
-            await u.message.reply_text("Выберите действие:", reply_markup=main_keyboard())
+            return
 
+        if text == "🌍 Изменить часовой пояс":
+            update_user(u, step=WAIT_TZ)
+            await u.message.reply_text(
+            "Выбери новый часовой пояс:",
+            reply_markup=tz_keyboard(),
+            )
+            return
+
+        if text == "⏰ Изменить время уведомлений":
+            update_user(u, step=WAIT_NOTIFY_TIME)
+            await u.message.reply_text(
+            "Выбери новое время уведомлений или введи своё (ЧЧ:ММ):",
+            reply_markup=time_keyboard(),
+            )
+            return
+        if text == "💳 Мой тариф":
+            status = row[COL_STATUS].lower()
+            trial_until = row[COL_TRIAL_UNTIL]
+            if status == "premium":
+                msg = (
+                    "💳 *Ваш тариф: PREMIUM*\n\n"
+                    "✅ Полный доступ без ограничений\n"
+                    "🔔 Ежедневные уведомления активны"
+                    )
+            else:
+                msg = (
+                    "💳 *Ваш тариф: ПРОБНЫЙ*\n\n"
+                    f"⏳ Действует до: *{trial_until}*\n\n"
+                    "После окончания пробного периода доступ будет ограничен.\n"
+                    "Для подключения PREMIUM:\n"
+                    "📞 +7 778 990 01 14"
+                    )
+
+            await u.message.reply_text(
+                msg,
+                parse_mode="Markdown",
+                reply_markup=main_keyboard(),
+                )
+            return
+
+    await u.message.reply_text(
+        "Выберите действие:",
+        reply_markup=main_keyboard(),
+        )
 
 # ================= SERVER =================
 app = Flask(__name__)
