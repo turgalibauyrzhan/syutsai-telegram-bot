@@ -108,6 +108,32 @@ def get_ws():
         creds_json,
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(GSHEET_ID)
+
+    try:
+        ws = sh.worksheet("users")
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.add_worksheet(title="users", rows=1000, cols=9)
+        ws.append_row([
+            "user_id",
+            "status",
+            "trial_until",
+            "birth_date",
+            "timezone",
+            "notify_time",
+            "step",
+            "created_at",
+            "updated_at",
+        ])
+
+    return ws
+
+    creds_json = json.loads(base64.b64decode(GOOGLE_SA_JSON_B64).decode())
+    creds = Credentials.from_service_account_info(
+        creds_json,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
     return gspread.authorize(creds).open_by_key(GSHEET_ID).worksheet("users")
 
 def get_user(update: Update):
