@@ -210,8 +210,7 @@ async def send_full_forecast(u: Update, row):
         od = reduce9(now.day + now.month + now.year)
 
         msg = f"📅 *ПРОГНОЗ НА {now.strftime('%d.%m.%Y')}*\n\n"
-        msg += (
-            f"🌐 *Общий день {od}:*\n"
+        msg += f"🌐 *Общий день {od}:*\n" + \
             f"{DESC_OD.get(str(od), '')}\n\n"
         msg += f"📍 *Личный день {ld}:*\n{DESC_LD.get(str(ld),'')}"
         y = DESC_LG.get(str(lg), {})
