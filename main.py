@@ -59,7 +59,6 @@ def time_keyboard():
         [
             [KeyboardButton("06:00"), KeyboardButton("08:00")],
             [KeyboardButton("09:00"), KeyboardButton("11:00")],
-            ,
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
