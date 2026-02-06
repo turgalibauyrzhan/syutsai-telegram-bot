@@ -167,10 +167,35 @@ def sync_user(update: Update, **fields):
     except Exception:
         log.exception("GSheet error")
         return None
+def has_access(row) -> bool:
+    """
+    row:
+    1  -> status
+    3  -> trial_until (ДД.ММ.ГГГГ)
+    """
+    status = row[1].strip().lower()
+
+    if status == "premium":
+        return True
+
+    try:
+        trial_until = datetime.strptime(row[3], "%d.%m.%Y").date()
+    except Exception:
+        return False
+
+    return datetime.now().date() <= trial_until
 
 
 # ================= ПРОГНОЗ =================
 async def send_full_forecast(u: Update, row):
+    if not has_access(row):
+    await u.message.reply_text(
+        "⛔ Пробный период завершён.\n\n"
+        "Для продолжения доступа обратитесь:\n"
+        "📞 +7 778 990 01 14"
+    )
+    return
+
     try:
         birth_raw = row[4].strip()
         tz_name = row[12] or DEFAULT_TZ
@@ -268,14 +293,17 @@ async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     # -------- READY --------
     if step == READY:
+        if not has_access(row):
+            await u.message.reply_text(
+                "⛔ Пробный период завершён.\n\n"
+                "Для продолжения доступа обратитесь:\n"
+                "📞 +7 778 990 01 14"
+            )
+            return
+
         if text == "📅 Мой прогноз":
             await send_full_forecast(u, row)
-        else:
-            await u.message.reply_text(
-                "Используйте кнопку «Мой прогноз».",
-                reply_markup=main_keyboard(),
-            )
-        return
+
 async def send_daily_forecast(application: Application, row):
     try:
         fake_update = Update(
@@ -311,6 +339,10 @@ def daily_job():
                 continue
             if r[14] != READY:
                 continue
+
+            if not has_access(r):
+                continue
+
 
             uid = r[0]
             tz_name = r[12]
