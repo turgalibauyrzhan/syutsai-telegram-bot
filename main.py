@@ -282,25 +282,16 @@ async def send_full_forecast(u: Update, row):
     od = reduce9(now.day + now.month + now.year)
 
     msg = (
-        f"📅 *ПРОГНОЗ НА {now.strftime('%d.%m.%Y')}*\n\n"
-        msg += f"🌐 *Общий день {od}:*\n" + \
-            f"{DESC_OD.get(str(od), '')}\n\n"
-        msg += f"📍 *Личный день {ld}:*\n{DESC_LD.get(str(ld),'')}"
-        msg += f"🌐 *Общий день {od}:*\n{DESC_OD.get(str(od),'')}\n\n"
-        msg += f"📍 *Личный день {ld}:*\n{DESC_LD.get(str(ld),'')}\n\n"
-
+        msg = f"📅 *ПРОГНОЗ НА {now.strftime('%d.%m.%Y')}*\n\n"
+        msg += f"🌐 *Общий день {od}:*\n{DESC_OD.get(str(od), '')}\n\n"
+        msg += f"📍 *Личный день {ld}:*\n{DESC_LD.get(str(ld), '')}\n\n"
         y = DESC_LG.get(str(lg), {})
         m = DESC_LM.get(str(lm), {})
-
         msg += f"✨ *Личный год {lg}: {y.get('n','')}*\n_{y.get('d','')}_\n"
         msg += f"*Рекомендации:* {y.get('r','')}\n"
         msg += f"*В минусе:* {y.get('m','')}\n\n"
-
         msg += f"🌙 *Личный месяц {lm}: {m.get('n','')}*\n_{m.get('d','')}_\n"
-        msg += f"*В минусе:* {m.get('m','')}\n\n"
-
-
-        msg += f"*В минусе:* {m.get('m','')}"
+        msg += f"*В минусе:* {m.get('m','')}\n"
     )
 
     await u.message.reply_text(
