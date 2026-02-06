@@ -238,7 +238,18 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
     text = u.message.text.strip()
     row = get_user(u)
+
+    if not row:
+        # пользователь есть в Telegram, но нет в Sheets
+        update_user(u, step=WAIT_TZ)
+        await u.message.reply_text(
+            "Давай начнём сначала 🙂\nВыбери часовой пояс:",
+            reply_markup=tz_keyboard()
+        )
+        return
+
     step = row[6]
+
 
     if step in [WAIT_TZ, CHANGE_TZ]:
         if "Алматы" in text or "Москва" in text:
