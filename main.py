@@ -5,14 +5,10 @@ import logging
 import asyncio
 import threading
 from datetime import datetime, timedelta
-from desc_lg import DESC_LG
-from desc_lm import DESC_LM
-from desc_ld import DESC_LD
-from desc_od import DESC_OD
-import pytz
-from apscheduler.schedulers.background import BackgroundScheduler
 
+import pytz
 from flask import Flask, request
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from telegram import (
     Update,
@@ -31,6 +27,11 @@ from telegram.ext import (
 import gspread
 from google.oauth2.service_account import Credentials
 
+from desc_lg import DESC_LG
+from desc_lm import DESC_LM
+from desc_ld import DESC_LD
+from desc_od import DESC_OD
+
 
 # ================= НАСТРОЙКИ =================
 logging.basicConfig(level=logging.INFO)
@@ -43,11 +44,20 @@ GOOGLE_SA_JSON_B64 = os.getenv("GOOGLE_SA_JSON_B64")
 
 DEFAULT_TZ = "Asia/Almaty"
 
-# step значения
 WAIT_TZ = "WAIT_TZ"
 WAIT_NOTIFY_TIME = "WAIT_NOTIFY_TIME"
 WAIT_BIRTH = "WAIT_BIRTH"
 READY = "READY"
+
+# ====== КОЛОНКИ ======
+COL_UID = 0
+COL_STATUS = 1
+COL_TRIAL_UNTIL = 3
+COL_BIRTH = 4
+COL_TZ = 11
+COL_NOTIFY_TIME = 12
+COL_STEP = 13
+
 
 # ================= КЛАВИАТУРЫ =================
 def tz_keyboard():
@@ -111,79 +121,67 @@ def get_ws():
     return gspread.authorize(creds).open_by_key(GSHEET_ID).worksheet("subscriptions")
 
 
-def sync_user(update: Update, **fields):
-    """
-    Храним:
-    0 uid
-    4 birth
-    12 tz
-    13 notify_time
-    14 step
-    """
-    try:
-        ws = get_ws()
-        uid = str(update.effective_user.id)
-        rows = ws.get_all_values()
-        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+def get_user(update: Update):
+    ws = get_ws()
+    uid = str(update.effective_user.id)
+    rows = ws.get_all_values()
 
-        for i, r in enumerate(rows, start=1):
-            if r and r[0] == uid:
-                if "birth" in fields:
-                    ws.update_cell(i, 5, fields["birth"])
-                if "tz" in fields:
-                    ws.update_cell(i, 12, fields["tz"])
-                if "notify_time" in fields:
-                    ws.update_cell(i, 13, fields["notify_time"])
-                if "step" in fields:
-                    ws.update_cell(i, 14, fields["step"])
+    for r in rows:
+        if r and r[COL_UID] == uid:
+            r += [""] * (14 - len(r))
+            return r
+    return None
 
-                ws.update_cell(i, 7, now)
 
-                row = ws.row_values(i)
-                row += [""] * (15 - len(row))
-                return row
+def update_user(update: Update, **fields):
+    ws = get_ws()
+    uid = str(update.effective_user.id)
+    rows = ws.get_all_values()
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-        # новый пользователь
-        row = [
-            uid,
-            "active",
-            "trial",
-            (datetime.now() + timedelta(days=3)).strftime("%d.%m.%Y"),
-            fields.get("birth", ""),
-            now,
-            now,
-            update.effective_user.username or "",
-            update.effective_user.first_name or "",
-            update.effective_user.last_name or "",
-            datetime.now().strftime("%d.%m.%Y"),
-            "",
-            fields.get("tz", ""),
-            fields.get("notify_time", ""),
-            fields.get("step", WAIT_TZ),
-        ]
-        ws.append_row(row)
-        return row
+    for i, r in enumerate(rows, start=1):
+        if r and r[COL_UID] == uid:
+            if "birth" in fields:
+                ws.update_cell(i, COL_BIRTH + 1, fields["birth"])
+            if "tz" in fields:
+                ws.update_cell(i, COL_TZ + 1, fields["tz"])
+            if "notify_time" in fields:
+                ws.update_cell(i, COL_NOTIFY_TIME + 1, fields["notify_time"])
+            if "step" in fields:
+                ws.update_cell(i, COL_STEP + 1, fields["step"])
 
-    except Exception:
-        log.exception("GSheet error")
-        return None
+            ws.update_cell(i, 7, now)
+            return
+
+    # новый пользователь
+    row = [
+        uid,
+        "active",
+        "trial",
+        (datetime.now() + timedelta(days=3)).strftime("%d.%m.%Y"),
+        "",
+        now,
+        now,
+        update.effective_user.username or "",
+        update.effective_user.first_name or "",
+        update.effective_user.last_name or "",
+        datetime.now().strftime("%d.%m.%Y"),
+        "",
+        "",
+        WAIT_TZ,
+    ]
+    ws.append_row(row)
+
+
 def has_access(row) -> bool:
-    """
-    row:
-    1  -> status
-    3  -> trial_until (ДД.ММ.ГГГГ)
-    """
-    status = row[1].strip().lower()
-
-    if status == "premium":
+    if row[COL_STATUS].lower() == "premium":
         return True
 
     try:
-        trial_until = datetime.strptime(row[3], "%d.%m.%Y").date()
+        trial_until = datetime.strptime(row[COL_TRIAL_UNTIL], "%d.%m.%Y").date()
+        return datetime.now().date() <= trial_until
     except Exception:
         return False
-
-    return datetime.now().date() <= trial_until
 
 
 # ================= ПРОГНОЗ =================
@@ -195,16 +193,15 @@ async def send_full_forecast(u: Update, row):
     if not has_access(row):
         await u.message.reply_text(
             "⛔ Пробный период завершён.\n\n"
-            "Для продолжения доступа обратитесь:\n"
-            "📞 +7 778 990 01 14"
+            "Для продолжения доступа:\n📞 +7 778 990 01 14"
         )
         return
 
     try:
-        birth_raw = row[4].strip()
-        tz_name = row[12] or DEFAULT_TZ
+        birth = row[COL_BIRTH]
+        tz_name = row[COL_TZ] or DEFAULT_TZ
 
-        bd = datetime.strptime(birth_raw, "%d.%m.%Y")
+        bd = datetime.strptime(birth, "%d.%m.%Y")
         tz = pytz.timezone(tz_name)
         now = datetime.now(tz)
 
@@ -214,22 +211,23 @@ async def send_full_forecast(u: Update, row):
         od = reduce9(now.day + now.month + now.year)
 
         msg = f"📅 *ПРОГНОЗ НА {now.strftime('%d.%m.%Y')}*\n\n"
-        msg += f"🌐 *Общий день {od}:*\n" + \
-            f"{DESC_OD.get(str(od), '')}\n\n"
-        msg += f"📍 *Личный день {ld}:*\n{DESC_LD.get(str(ld),'')}"
+        msg += f"🌐 *Общий день {od}:*\n{DESC_OD.get(str(od),'')}\n\n"
+        msg += f"📍 *Личный день {ld}:*\n{DESC_LD.get(str(ld),'')}\n\n"
+
         y = DESC_LG.get(str(lg), {})
         m = DESC_LM.get(str(lm), {})
+
         msg += f"✨ *Личный год {lg}: {y.get('n','')}*\n_{y.get('d','')}_\n"
         msg += f"*Рекомендации:* {y.get('r','')}\n"
         msg += f"*В минусе:* {y.get('m','')}\n\n"
+
         msg += f"🌙 *Личный месяц {lm}: {m.get('n','')}*\n_{m.get('d','')}_\n"
-        msg += f"*В минусе:* {m.get('m','')}\n\n"
-        
-        
+        msg += f"*В минусе:* {m.get('m','')}"
+
         await u.message.reply_text(
             msg,
             parse_mode="Markdown",
-            reply_markup=main_keyboard()
+            reply_markup=main_keyboard(),
         )
 
     except Exception:
@@ -239,139 +237,52 @@ async def send_full_forecast(u: Update, row):
 
 # ================= HANDLERS =================
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    sync_user(u, step=WAIT_TZ)
-    await u.message.reply_text(
-        "Выбери часовой пояс:",
-        reply_markup=tz_keyboard(),
-    )
+    update_user(u, step=WAIT_TZ)
+    await u.message.reply_text("Выбери часовой пояс:", reply_markup=tz_keyboard())
 
 
 async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
     text = u.message.text.strip()
-    row = sync_user(u)
-    step = row[14] if row and len(row) > 14 else WAIT_TZ
+    row = get_user(u)
+    step = row[COL_STEP] if row else WAIT_TZ
 
-    # -------- WAIT_TZ --------
     if step == WAIT_TZ:
         if text in ["🇰🇿 Алматы", "🇷🇺 Москва"]:
             tz = "Asia/Almaty" if "Алматы" in text else "Europe/Moscow"
-            sync_user(u, tz=tz, step=WAIT_NOTIFY_TIME)
+            update_user(u, tz=tz, step=WAIT_NOTIFY_TIME)
             await u.message.reply_text(
                 "Выбери время уведомления или введи своё (ЧЧ:ММ):",
                 reply_markup=time_keyboard(),
             )
         else:
-            await u.message.reply_text(
-                "Пожалуйста, выбери часовой пояс кнопкой.",
-                reply_markup=tz_keyboard(),
-            )
+            await u.message.reply_text("Выбери часовой пояс кнопкой.", reply_markup=tz_keyboard())
         return
 
-    # -------- WAIT_NOTIFY_TIME --------
     if step == WAIT_NOTIFY_TIME:
         if validate_time(text):
-            sync_user(u, notify_time=text, step=WAIT_BIRTH)
+            update_user(u, notify_time=text, step=WAIT_BIRTH)
             await u.message.reply_text(
                 "Время сохранено.\nВведи дату рождения (ДД.ММ.ГГГГ):",
                 reply_markup=ReplyKeyboardRemove(),
             )
         else:
-            await u.message.reply_text(
-                "Введите время в формате ЧЧ:ММ, например 08:30",
-                reply_markup=time_keyboard(),
-            )
+            await u.message.reply_text("Формат времени ЧЧ:ММ", reply_markup=time_keyboard())
         return
 
-    # -------- WAIT_BIRTH --------
     if step == WAIT_BIRTH:
-        bd = validate_date(text)
-        if bd:
-            row = sync_user(u, birth=text, step=READY)
-            row = sync_user(u)
+        if validate_date(text):
+            update_user(u, birth=text, step=READY)
+            row = get_user(u)
             await send_full_forecast(u, row)
         else:
-            await u.message.reply_text(
-                "Дата должна быть в формате ДД.ММ.ГГГГ",
-            )
+            await u.message.reply_text("Дата должна быть в формате ДД.ММ.ГГГГ")
         return
 
-    # -------- READY --------
     if step == READY:
-        if not has_access(row):
-            await u.message.reply_text(
-                "⛔ Пробный период завершён.\n\n"
-                "Для продолжения доступа обратитесь:\n"
-                "📞 +7 778 990 01 14"
-            )
-            return
-
         if text == "📅 Мой прогноз":
             await send_full_forecast(u, row)
-        await u.message.reply_text(
-            "Выберите действие:",
-            reply_markup=main_menu()
-            )
-
-async def send_daily_forecast(application: Application, row):
-    try:
-        fake_update = Update(
-            update_id=0,
-            message=None,
-        )
-        fake_update._effective_user = type(
-            "User", (), {"id": int(row[0])}
-        )
-
-        class FakeMessage:
-            async def reply_text(self, *args, **kwargs):
-                await application.bot.send_message(
-                    chat_id=row[0],
-                    text=args[0],
-                    parse_mode=kwargs.get("parse_mode"),
-                    reply_markup=kwargs.get("reply_markup"),
-                )
-
-        fake_update.message = FakeMessage()
-
-        await send_full_forecast(fake_update, row)
-
-    except Exception:
-        log.exception("Daily forecast error")
-def daily_job():
-    try:
-        ws = get_ws()
-        rows = ws.get_all_values()
-
-        for r in rows[1:]:
-            if len(r) < 15:
-                continue
-            if r[14] != READY:
-                continue
-
-            if not has_access(r):
-                continue
-
-
-            uid = r[0]
-            tz_name = r[12]
-            notify_time = r[13]
-
-            if not tz_name or not notify_time:
-                continue
-
-            tz = pytz.timezone(tz_name)
-            now = datetime.now(tz)
-
-            hh, mm = map(int, notify_time.split(":"))
-
-            if now.hour == hh and abs(now.minute - mm) <= 1:
-                asyncio.run_coroutine_threadsafe(
-                    send_daily_forecast(application, r),
-                    loop,
-                )
-
-    except Exception:
-        log.exception("Scheduler error")
+        else:
+            await u.message.reply_text("Выберите действие:", reply_markup=main_keyboard())
 
 
 # ================= SERVER =================
@@ -381,13 +292,13 @@ application = Application.builder().token(TELEGRAM_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
 
-
-# ================= EVENT LOOP =================
 loop = asyncio.new_event_loop()
+
 
 def run_loop():
     asyncio.set_event_loop(loop)
     loop.run_forever()
+
 
 threading.Thread(target=run_loop, daemon=True).start()
 
@@ -399,25 +310,11 @@ def webhook():
     return "OK", 200
 
 
-@app.route("/")
-def index():
-    return "Bot is running", 200
-
-
 if __name__ == "__main__":
     asyncio.run_coroutine_threadsafe(application.initialize(), loop)
     asyncio.run_coroutine_threadsafe(application.start(), loop)
     asyncio.run_coroutine_threadsafe(
-        application.bot.set_webhook(f"{PUBLIC_URL}/webhook"),
-        loop,
+        application.bot.set_webhook(f"{PUBLIC_URL}/webhook"), loop
     )
-scheduler = BackgroundScheduler()
-scheduler.add_job(daily_job, "interval", minutes=1)
-scheduler.start()
 
-app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000)),
-        )
-    
-    
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
