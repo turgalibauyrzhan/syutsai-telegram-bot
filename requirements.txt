@@ -1,6 +1,6 @@
 python-telegram-bot[webhooks]==20.8
 gspread
 google-auth
-apscheduler
+apscheduler==3.10.4
 pytz
 flask[async]
