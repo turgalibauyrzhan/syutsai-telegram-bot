@@ -57,9 +57,9 @@ def tz_keyboard():
 def time_keyboard():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("06:00"), KeyboardButton("09:00")],
-            [KeyboardButton("12:00"), KeyboardButton("18:00")],
-            [KeyboardButton("21:00")],
+            [KeyboardButton("06:00"), KeyboardButton("08:00")],
+            [KeyboardButton("09:00"), KeyboardButton("11:00")],
+            ,
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
@@ -234,10 +234,11 @@ async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if step == WAIT_BIRTH:
         if validate_date(text):
             update_user(u, birth_date=text, step=READY)
-            await u.message.reply_text("Готово ✅", reply_markup=main_keyboard())
+            await send_full_forecast(u, get_user(u))
         else:
             await u.message.reply_text("Неверный формат даты.")
         return
+
 
     if text == "🌍 Изменить часовой пояс":
         update_user(u, step=CHANGE_TZ)
@@ -248,6 +249,9 @@ async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
         update_user(u, step=CHANGE_NOTIFY_TIME)
         await u.message.reply_text("Введите новое время:", reply_markup=time_keyboard())
         return
+    if text == "📅 Мой прогноз":
+        await send_full_forecast(u, row)
+        return
 
     if text == "💳 Мой тариф":
         await u.message.reply_text(
@@ -255,6 +259,56 @@ async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
             f"⏳ До: {row[2]}"
         )
         return
+def reduce9(n: int) -> int:
+    while n > 9:
+        n = sum(map(int, str(n)))
+    return n
+
+
+async def send_full_forecast(u: Update, row):
+    if not row or not row[3]:
+        await u.message.reply_text(
+            "Сначала укажи дату рождения 🙂",
+            reply_markup=main_keyboard()
+        )
+        return
+
+    bd = datetime.strptime(row[3], "%d.%m.%Y")
+    tz = pytz.timezone(row[4] or DEFAULT_TZ)
+    now = datetime.now(tz)
+
+    lg = reduce9(bd.day + bd.month + now.year)
+    lm = reduce9(lg + now.month)
+    ld = reduce9(lm + now.day)
+    od = reduce9(now.day + now.month + now.year)
+
+    msg = (
+        f"📅 *ПРОГНОЗ НА {now.strftime('%d.%m.%Y')}*\n\n"
+        msg += f"🌐 *Общий день {od}:*\n" + \
+            f"{DESC_OD.get(str(od), '')}\n\n"
+        msg += f"📍 *Личный день {ld}:*\n{DESC_LD.get(str(ld),'')}"
+        msg += f"🌐 *Общий день {od}:*\n{DESC_OD.get(str(od),'')}\n\n"
+        msg += f"📍 *Личный день {ld}:*\n{DESC_LD.get(str(ld),'')}\n\n"
+
+        y = DESC_LG.get(str(lg), {})
+        m = DESC_LM.get(str(lm), {})
+
+        msg += f"✨ *Личный год {lg}: {y.get('n','')}*\n_{y.get('d','')}_\n"
+        msg += f"*Рекомендации:* {y.get('r','')}\n"
+        msg += f"*В минусе:* {y.get('m','')}\n\n"
+
+        msg += f"🌙 *Личный месяц {lm}: {m.get('n','')}*\n_{m.get('d','')}_\n"
+        msg += f"*В минусе:* {m.get('m','')}\n\n"
+
+
+        msg += f"*В минусе:* {m.get('m','')}"
+    )
+
+    await u.message.reply_text(
+        msg,
+        parse_mode="Markdown",
+        reply_markup=main_keyboard()
+    )
 
 # ================= SERVER =================
 app = Flask(__name__)
