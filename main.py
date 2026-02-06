@@ -188,6 +188,10 @@ def has_access(row) -> bool:
 
 # ================= ПРОГНОЗ =================
 async def send_full_forecast(u: Update, row):
+    if not row:
+        await u.message.reply_text("❌ Данные пользователя не найдены.")
+    return
+
     if not has_access(row):
         await u.message.reply_text(
             "⛔ Пробный период завершён.\n\n"
@@ -283,6 +287,7 @@ async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
         bd = validate_date(text)
         if bd:
             row = sync_user(u, birth=text, step=READY)
+            row = sync_user(u)
             await send_full_forecast(u, row)
         else:
             await u.message.reply_text(
@@ -302,6 +307,10 @@ async def handle_msg(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
         if text == "📅 Мой прогноз":
             await send_full_forecast(u, row)
+        await u.message.reply_text(
+            "Выберите действие:",
+            reply_markup=main_menu()
+            )
 
 async def send_daily_forecast(application: Application, row):
     try:
